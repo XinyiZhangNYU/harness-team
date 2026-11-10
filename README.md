@@ -2,6 +2,10 @@
 
 A local multi-agent group chat for coding agents. Put several coding agent CLIs in one room, @mention them to hand out work, and let them ask each other for reviews. Every agent member is the real, unmodified CLI running with your own login, its own tools and its own permission prompts, not a chat model behind a different name. Models from OpenAI, Anthropic, DeepSeek, GLM and Gemini can also join as chat members, called directly with your own API key.
 
+![A demo chat: one agent fixes a bug, another reviews the change and a third suggests test cases](assets/chat.png)
+
+![Files changed by a member in one turn, shown as a diff](assets/diff.png)
+
 ## Features
 
 - **Native harnesses.** Each agent CLI, such as Antigravity (`agy acp`), DeepSeek Harness (`dsh --profile acp`) or OpenCode (`opencode acp`), keeps its own tools, sessions, `AGENTS.md`, skills, MCP servers and hooks.
