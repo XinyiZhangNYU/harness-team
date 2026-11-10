@@ -1,0 +1,35 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local runtime data
+data/
+logs/
+tmp/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.log
+
+# JavaScript build outputs
+node_modules/
+dist/
+build/
+coverage/
+.next/
+*.tsbuildinfo
+
+# Desktop
+src-tauri/target/
+release/
+out/
+
+# Local editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

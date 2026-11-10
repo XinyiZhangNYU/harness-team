@@ -1,0 +1,101 @@
+{
+  "name": "harness-team",
+  "productName": "Harness Team",
+  "version": "0.10.1",
+  "private": true,
+  "description": "Chat-first, harness-native, local-first multi-agent coding workspace",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "npm run build:web && node server/src/main.ts --open",
+    "serve": "node server/src/main.ts",
+    "dev": "node server/src/main.ts --dev --open",
+    "build:web": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "licenses": "node scripts/licenses.mjs",
+    "desktop": "npm run build:web && electron .",
+    "dist:win": "npm run build:web && electron-builder --win nsis --x64",
+    "dist:mac": "npm run build:web && electron-builder --mac"
+  },
+  "dependencies": {
+    "ws": "8.22.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.2",
+    "@vitejs/plugin-react": "6.2.1",
+    "electron": "44.9.3",
+    "electron-builder": "26.18.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
+  },
+  "main": "desktop/electron/main.cjs",
+  "author": "Harness Team contributors",
+  "build": {
+    "appId": "dev.harness-team.desktop",
+    "productName": "Harness Team",
+    "copyright": "Copyright 2026 Harness Team contributors",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/electron/**",
+      "desktop/icons/icon-256.png",
+      "server/src/**",
+      "shared/**",
+      "web/dist/**",
+      "package.json",
+      "LICENSE",
+      "NOTICE"
+    ],
+    "asar": false,
+    "win": {
+      "icon": "desktop/icons/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "icon": "desktop/icons/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "artifactName": "Harness-Team-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Harness-Team-Setup-${version}.${ext}"
+    },
+    "extraResources": [],
+    "publish": null
+  }
+}

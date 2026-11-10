@@ -1,0 +1,278 @@
+import { useState } from 'react';
+import type { ActivityKind, AgentWithStatus, ApprovalDecision, Message, SessionChoiceOption } from '../../../shared/protocol.ts';
+import { api } from '../api.ts';
+import { readableCommand } from '../format.ts';
+import { localizeApprovalDetail, localizeDetail } from '../../../shared/notices.ts';
+import { usePrefs, useT, type TFunc, useNoticeText } from '../i18n.tsx';
+import { errorText } from './Dialog.tsx';
+import { HelpTip } from './HelpTip.tsx';
+import { Icon, type IconName } from './Icon.tsx';
+import { AgentAvatar, RUNTIME_NAME } from './RuntimeBadge.tsx';
+
+/** The member's avatar in the left gutter, on the first runtime row after someone else's message. */
+const lead = (show: boolean | undefined, sender: AgentWithStatus | undefined) => (show && sender ? <AgentAvatar agent={sender} className="avatar-gutter" /> : null);
+
+/**
+ * Real runtime events: tool activity and native approval requests reported by the runtime itself. Mock agents never
+ * produce these. Approval buttons send the local user's decision to the server, which forwards it on the exact native
+ * request id; nothing here decides on its own.
+ */
+
+const ACTIVITY_ICON: Record<ActivityKind, IconName> = {
+  command: 'terminal',
+  fileChange: 'file',
+  mcpToolCall: 'wrench',
+  webSearch: 'search',
+  plan: 'list',
+  notice: 'info',
+  reasoning: 'bulb',
+  other: 'wrench',
+};
+
+const activityLabel = (t: TFunc, k: ActivityKind) => t(`activity.${k}`);
+
+function statusText(t: TFunc, s: Message['status']): string {
+  return t(`activity.${s}`);
+}
+
+/** Native statuses worth showing next to ours; plain synonyms ("completed", "inProgress"…) only go in the tooltip. */
+function nativeStatusText(t: TFunc, s: string): string | undefined {
+  if (s === 'declined' || s === 'denied' || s === 'rejected') return t('activity.declined');
+  if (s === 'cancelled' || s === 'canceled') return t('activity.cancelled');
+  return undefined;
+}
+
+export function ActivityItem({ message, sender, showAvatar }: { message: Message; sender?: AgentWithStatus; showAvatar?: boolean }) {
+  const t = useT();
+  const { lang } = usePrefs();
+  const noticeText = useNoticeText();
+  const meta = message.meta?.type === 'activity' ? message.meta : null;
+  const kind = meta?.activity ?? 'other';
+  const nativeExtra = meta?.nativeStatus ? nativeStatusText(t, meta.nativeStatus) : undefined;
+  const status = nativeExtra ? `${statusText(t, message.status)} · ${nativeExtra}` : statusText(t, message.status);
+  const rawTitle = noticeText(meta?.label, meta?.title ?? message.body);
+  const title = kind === 'command' ? readableCommand(rawTitle) : rawTitle;
+  const head = (
+    <>
+      <Icon name={ACTIVITY_ICON[kind]} size={14} className="activity-icon" />
+      <span className="activity-kind">{activityLabel(t, kind)}</span>
+      {sender && <span className="activity-who">@{sender.handle}</span>}
+      {kind !== 'reasoning' && (
+        <code className="activity-title" title={rawTitle !== title ? rawTitle : undefined}>
+          {title}
+        </code>
+      )}
+      <span className={`msg-status st-${message.status}`} title={meta?.nativeStatus ?? undefined}>
+        {status}
+      </span>
+    </>
+  );
+  return (
+    <div className={`activity activity-${message.status}`} data-seq={message.seq} data-native-item={meta?.nativeItemId}>
+      {lead(showAvatar, sender)}
+      {meta?.detail ? (
+        <details className="activity-detail">
+          <summary className="activity-head">{head}</summary>
+          <pre>{localizeDetail(meta.detail, lang)}</pre>
+        </details>
+      ) : (
+        <div className="activity-head">{head}</div>
+      )}
+    </div>
+  );
+}
+
+const decisionLabel = (t: TFunc, d: ApprovalDecision) => t(`approval.${d}`);
+
+export function ApprovalCard({ message, sender, showAvatar }: { message: Message; sender?: AgentWithStatus; showAvatar?: boolean }) {
+  const t = useT();
+  const { lang } = usePrefs();
+  const noticeText = useNoticeText();
+  const meta = message.meta?.type === 'approval' ? message.meta : null;
+  const state = meta?.state ?? 'pending';
+  const [busy, setBusy] = useState<ApprovalDecision | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const options = meta?.options ?? [];
+  const decide = (d: ApprovalDecision) => {
+    setBusy(d);
+    setError(null);
+    api.decideApproval(message.id, d).then(
+      () => setBusy(null),
+      (e: unknown) => {
+        setBusy(null);
+        setError(errorText(e));
+      },
+    );
+  };
+  let outcome: string | null = null;
+  if (meta && state === 'resolved') {
+    outcome =
+      meta.decidedBy === 'user'
+        ? t('approval.chose', { decision: decisionLabel(t, meta.userDecision ?? 'deny') })
+        : t('approval.closed', { runtime: RUNTIME_NAME[meta.runtime] }) + (meta.decision ? ` (${meta.decision})` : '');
+  }
+  const body = noticeText(meta?.label, meta?.title ?? message.body);
+  // Answered or closed: one line like a tool row; the details open on click.
+  if (state !== 'pending') {
+    const short = meta?.decidedBy === 'user' ? decisionLabel(t, meta.userDecision ?? 'deny') : t(`approval.${state}`);
+    return (
+      <div className={`activity approval-done approval-${state}`} data-seq={message.seq} role="group" aria-label={t('approval.title')}>
+        {lead(showAvatar, sender)}
+        <details className="activity-detail">
+          <summary className="activity-head">
+            <Icon name="shield" size={14} className="activity-icon" />
+            <span className="activity-kind">{t('approval.title')}</span>
+            {sender && <span className="activity-who">@{sender.handle}</span>}
+            <span className="activity-title">{body}</span>
+            <span className="msg-status">{short}</span>
+          </summary>
+          <div className="approval-done-body">
+            {meta?.reason && (
+              <div className="approval-reason">
+                <span className="approval-reason-label">{t('approval.reason')}</span> {meta.reason}
+              </div>
+            )}
+            {meta?.detail && <pre className="approval-detail">{localizeApprovalDetail(meta.detail, lang)}</pre>}
+            {meta?.workspace && (
+              <div className="approval-where" title={`${meta.runtime} · ${meta.nativeMethod} · ${meta.nativeRequestId}`}>
+                {meta.workspace}
+              </div>
+            )}
+            {outcome && <div className="approval-outcome">{outcome}</div>}
+          </div>
+        </details>
+      </div>
+    );
+  }
+  return (
+    <div className={`approval approval-${state}`} data-seq={message.seq} role="group" aria-label={t('approval.title')}>
+      {lead(showAvatar, sender)}
+      <div className="approval-title">
+        <Icon name="shield" size={14} />
+        <span>{t('approval.title')}</span>
+        <HelpTip
+          text={[t('approval.help'), ...options.map((d) => t(`approval.help_${d}`))].join(' ')}
+        />
+        {sender && <span className="approval-who">@{sender.handle}</span>}
+        <span className={`approval-state state-${state}`}>{t(`approval.${state}`)}</span>
+      </div>
+      <div className="approval-body">{body}</div>
+      {meta?.reason && (
+        <div className="approval-reason">
+          <span className="approval-reason-label">{t('approval.reason')}</span> {meta.reason}
+        </div>
+      )}
+      {meta?.detail && <pre className="approval-detail">{localizeApprovalDetail(meta.detail, lang)}</pre>}
+      {meta?.workspace && (
+        <div className="approval-where" title={`${meta.runtime} · ${meta.nativeMethod} · ${meta.nativeRequestId}`}>
+          {meta.workspace}
+        </div>
+      )}
+      {outcome && <div className="approval-outcome">{outcome}</div>}
+      {state === 'pending' && options.length > 0 && (
+        <div className="approval-actions">
+          {options.map((d) => (
+            <button
+              key={d}
+              type="button"
+              className={d === 'deny' ? 'danger-outline' : d === 'allow' ? 'primary' : undefined}
+              disabled={busy !== null}
+              onClick={() => decide(d)}
+            >
+              {busy === d ? t('approval.sending') : decisionLabel(t, d)}
+            </button>
+          ))}
+        </div>
+      )}
+      {state === 'pending' && options.length === 0 && <div className="hint">{t('approval.cannotAnswer')}</div>}
+      {error && <div className="error-text">{t('approval.notSent', { error })}</div>}
+    </div>
+  );
+}
+
+/**
+ * "A member's session could not be resumed": the notice text plus the user's choice (restore the archived session /
+ * retry / start a new one). Messages to that member wait until one is picked.
+ */
+export function SessionChoiceCard({ message, sender }: { message: Message; sender?: AgentWithStatus }) {
+  const t = useT();
+  const noticeText = useNoticeText();
+  const meta = message.meta?.type === 'notice' ? message.meta : null;
+  const sc = meta?.sessionChoice;
+  const [busy, setBusy] = useState<SessionChoiceOption | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (!meta || !sc) return null;
+  const [summary = '', ...rest] = noticeText(meta.notice, message.body).split('\n');
+  const choose = (c: SessionChoiceOption) => {
+    setBusy(c);
+    setError(null);
+    api.chooseSession(message.id, c).then(
+      () => setBusy(null),
+      (e: unknown) => {
+        setBusy(null);
+        setError(errorText(e));
+      },
+    );
+  };
+  const done = sc.state !== 'pending';
+  return (
+    <div className={`approval session-choice${done ? ' approval-resolved' : ' approval-pending'}`} data-seq={message.seq} role="group" aria-label={t('choice.title')}>
+      <div className="approval-title">
+        <Icon name="info" size={14} />
+        <span>{t('choice.title')}</span>
+        {sender && <span className="approval-who">@{sender.handle}</span>}
+        <span className={`approval-state state-${done ? 'resolved' : 'pending'}`}>{done ? t('choice.decided') : t('choice.waiting')}</span>
+      </div>
+      <div className="approval-body">{summary}</div>
+      {rest.length > 0 && <pre className="approval-detail">{rest.join('\n')}</pre>}
+      {sc.state !== 'pending' && <div className="approval-outcome">{t(`choice.did_${sc.state}`)}</div>}
+      {!done && (
+        <div className="approval-actions">
+          {sc.options.map((c) => (
+            <button key={c} type="button" className={c === sc.options[0] ? 'primary' : undefined} disabled={busy !== null} onClick={() => choose(c)}>
+              {busy === c ? t('approval.sending') : t(`choice.${c}`)}
+            </button>
+          ))}
+        </div>
+      )}
+      {error && <div className="error-text">{error}</div>}
+    </div>
+  );
+}
+
+/**
+ * A run of consecutive tool activities by one member, folded to a summary line so long tool logs do not bury the
+ * conversation. The latest item stays visible; anything still running or failed is never hidden.
+ */
+export function ActivityGroup({ messages, sender, showAvatar }: { messages: Message[]; sender?: AgentWithStatus; showAvatar?: boolean }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const running = messages.filter((m) => m.status === 'streaming').length;
+  const failed = messages.filter((m) => m.status === 'failed').length;
+  const kinds = new Map<ActivityKind, number>();
+  for (const m of messages) {
+    const k = m.meta?.type === 'activity' ? m.meta.activity : 'other';
+    kinds.set(k, (kinds.get(k) ?? 0) + 1);
+  }
+  const summary = [...kinds].map(([k, n]) => `${activityLabel(t, k)} ${n}`).join(' · ');
+  const last = messages[messages.length - 1]!;
+  const visible = open ? messages : messages.filter((m, i) => i === messages.length - 1 || m.status === 'streaming' || m.status === 'failed');
+  return (
+    <div className="activity-group" data-seq={messages[0]!.seq} data-last-seq={last.seq}>
+      {lead(showAvatar, sender)}
+      <button type="button" className="activity-group-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+        <span>
+          {t('activity.group', { n: messages.length })}
+          {sender ? ` · @${sender.handle}` : ''}
+        </span>
+        <span className="muted">{summary}</span>
+        {running > 0 && <span className="msg-status st-streaming">{t('activity.running', { n: running })}</span>}
+        {failed > 0 && <span className="msg-status st-failed">{t('activity.failedN', { n: failed })}</span>}
+      </button>
+      {visible.map((m) => (
+        <ActivityItem key={m.id} message={m} sender={sender} />
+      ))}
+    </div>
+  );
+}
