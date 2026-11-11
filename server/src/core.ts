@@ -834,7 +834,7 @@ export class Core {
 
   /** Sets (or with null removes) a runtime's default avatar; every window shows it at once. Members' own pictures win. */
   setAvatarDefault(kind: string, avatar: string | null): AvatarDefaults {
-    if (!isAvatarDefaultKey(kind)) throw new CoreError(400, L('只有 Claude Code、Codex、Antigravity、dsh、OpenCode 和模型供应商可以设置默认头像', 'Only Claude Code, Codex, Antigravity, dsh, OpenCode and model providers can have a default avatar'));
+    if (!isAvatarDefaultKey(kind)) throw new CoreError(400, L('只有 Claude Code、Codex、Antigravity、dsh、OpenCode、Cursor、Grok 和模型供应商可以设置默认头像', 'Only Claude Code, Codex, Antigravity, dsh, OpenCode, Cursor, Grok and model providers can have a default avatar'));
     if (avatar !== null && !isAgentAvatar(avatar)) throw new CoreError(400, L('头像格式不正确', 'Invalid avatar image'));
     this.store.setAvatarDefault(kind, avatar);
     const defaults = this.store.avatarDefaults();

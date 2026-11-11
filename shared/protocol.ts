@@ -5,7 +5,7 @@ export type { Localized, NoticeText } from './notices.ts';
 // Keep this file free of runtime dependencies so both sides can import it.
 
 /** `chat` = a chat member: Harness Team calls a model API with the user's own key (no external harness). */
-export type RuntimeKind = 'mock' | 'codex' | 'claude' | 'antigravity' | 'dsh' | 'opencode' | 'chat';
+export type RuntimeKind = 'mock' | 'codex' | 'claude' | 'antigravity' | 'dsh' | 'opencode' | 'cursor' | 'grok' | 'chat';
 
 /**
  * How far other members may orchestrate an Antigravity member (an automatic-orchestration permission, not an auth or
@@ -244,7 +244,7 @@ export const AGENT_AVATAR_MAX = 120_000;
 export const isAgentAvatar = (v: unknown): v is string => typeof v === 'string' && v.length <= AGENT_AVATAR_MAX && AGENT_AVATAR_RE.test(v);
 
 /** Runtimes that can have a default member avatar: shown for that runtime's members without a picture of their own. */
-export const AVATAR_DEFAULT_KINDS = ['claude', 'codex', 'antigravity', 'dsh', 'opencode'] as const;
+export const AVATAR_DEFAULT_KINDS = ['claude', 'codex', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok'] as const;
 export type AvatarDefaultKind = (typeof AVATAR_DEFAULT_KINDS)[number];
 /** Chat members take their default avatar per saved model provider: `chat:<ChatProvider.id>`. */
 export type AvatarDefaultKey = AvatarDefaultKind | `chat:${string}`;
@@ -273,6 +273,8 @@ export type RuntimeBilling = 'subscription' | 'metered_api';
  *   member's process starts (read-only / workspace-write / danger-full-access; dsh's ACP server has no session modes).
  * - OpenCode: its ACP session mode (`mode` config option): build, or plan (read-only). For "follow my settings" nothing
  *   is sent and OpenCode's own permission rules apply.
+ * - Cursor: its ACP session mode: agent (tools still ask through session/request_permission), plan (read-only
+ *   planning) or ask (read-only Q&A). Offered only when `agent acp` reports them.
  * Whether this machine allows a mode (local settings, managed requirements, what the runtime reports) is in
  * RuntimeModelCatalog.permissionModes.
  * The modes in RISKY_PERMISSION_MODES run tools without any approval and need the user's confirmation of
@@ -282,13 +284,17 @@ export type ClaudePermissionMode = 'manual' | 'acceptEdits' | 'plan' | 'auto' | 
 export type CodexPermissionMode = 'read-only' | 'workspace-write' | 'untrusted' | 'auto-review' | 'full-access';
 export type AntigravityPermissionMode = 'default' | 'accept-edits' | 'plan' | 'skip-permissions';
 export type OpenCodePermissionMode = 'build' | 'plan';
-export type PermissionMode = ClaudePermissionMode | CodexPermissionMode | AntigravityPermissionMode | OpenCodePermissionMode;
+export type CursorPermissionMode = 'agent' | 'plan' | 'ask';
+export type PermissionMode = ClaudePermissionMode | CodexPermissionMode | AntigravityPermissionMode | OpenCodePermissionMode | CursorPermissionMode;
 export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = {
   claude: ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
   codex: ['read-only', 'workspace-write', 'untrusted', 'auto-review', 'full-access'],
   antigravity: ['default', 'accept-edits', 'plan', 'skip-permissions'],
   dsh: ['read-only', 'workspace-write', 'full-access'],
   opencode: ['build', 'plan'],
+  cursor: ['agent', 'plan', 'ask'],
+  // `grok agent stdio` reports no session modes and ignores plan: Grok's own permission setting applies.
+  grok: [],
   mock: [],
   chat: [],
 };
@@ -651,7 +657,7 @@ export function parseSlashCommand(text: string): { handle: string; name: string;
  * - claude-native-cli: user's unmodified `claude` CLI in -p stream-json mode (claude.ai subscription login)
  * - claude-agent-sdk-api: planned, Claude Agent SDK with the user's own Console API key (not implemented)
  */
-export type RuntimeBackend = 'mock' | 'codex-app-server' | 'claude-native-cli' | 'claude-agent-sdk-api' | 'antigravity-acp' | 'dsh-acp' | 'opencode-acp' | 'chat-api';
+export type RuntimeBackend = 'mock' | 'codex-app-server' | 'claude-native-cli' | 'claude-agent-sdk-api' | 'antigravity-acp' | 'dsh-acp' | 'opencode-acp' | 'cursor-acp' | 'grok-acp' | 'chat-api';
 
 export interface RuntimeDescriptor {
   kind: RuntimeKind;

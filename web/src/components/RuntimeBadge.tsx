@@ -9,6 +9,8 @@ export const RUNTIME_NAME: Record<AgentWithStatus['runtimeKind'], string> = {
   antigravity: 'Antigravity',
   dsh: 'DeepSeek Harness',
   opencode: 'OpenCode',
+  cursor: 'Cursor',
+  grok: 'Grok',
   chat: 'Chat',
 };
 
@@ -22,6 +24,8 @@ export function avatarText(runtimeKind: AgentWithStatus['runtimeKind'], displayN
   if (runtimeKind === 'antigravity') return 'AG';
   if (runtimeKind === 'dsh') return 'DS';
   if (runtimeKind === 'opencode') return 'OC';
+  if (runtimeKind === 'cursor') return 'Cu';
+  if (runtimeKind === 'grok') return 'Gk';
   return displayName.slice(0, 1).toUpperCase();
 }
 

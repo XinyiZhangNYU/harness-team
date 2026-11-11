@@ -48,6 +48,8 @@ const MEMBER_NAME: Record<RuntimeDescriptor['kind'], string> = {
   antigravity: 'Antigravity',
   dsh: 'DeepSeek',
   opencode: 'OpenCode',
+  cursor: 'Cursor',
+  grok: 'Grok',
   chat: 'Chat',
 };
 

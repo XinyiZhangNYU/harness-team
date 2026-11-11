@@ -98,6 +98,8 @@ const T = {
   'perm.dsh.full-access': { zh: '完全访问（danger-full-access）', en: 'Full access (danger-full-access)' },
   'perm.default': { zh: '默认（default）', en: 'Default (default)' },
   'perm.build': { zh: '构建（build）', en: 'Build (build)' },
+  'perm.agent': { zh: 'Agent（agent）', en: 'Agent (agent)' },
+  'perm.ask': { zh: '只问答（ask）', en: 'Ask only (ask)' },
   'perm.accept-edits': { zh: '自动接受编辑（accept-edits）', en: 'Accept edits (accept-edits)' },
   'perm.skip-permissions': { zh: '跳过所有审批（--dangerously-skip-permissions）', en: 'Skip all approvals (--dangerously-skip-permissions)' },
   'agent.applyAfterTurn': {
@@ -252,6 +254,12 @@ const T = {
   'claude.quotaReset': { zh: '，约 {time} 重置', en: ', resets around {time}' },
   'claude.quotaWarning': { zh: 'Claude 订阅额度即将用尽（{type}{used}）', en: 'Claude subscription limit almost reached ({type}{used})' },
   'claude.quotaUsed': { zh: '，已用 {pct}%', en: ', {pct}% used' },
+  'claude.limit.five_hour': { zh: '5 小时额度', en: '5-hour limit' },
+  'claude.limit.seven_day': { zh: '每周额度', en: 'weekly limit' },
+  'claude.limit.seven_day_opus': { zh: 'Opus 每周额度', en: 'Opus limit' },
+  'claude.limit.seven_day_sonnet': { zh: 'Sonnet 每周额度', en: 'Sonnet limit' },
+  'claude.limit.seven_day_overage_included': { zh: 'Fable 额度', en: 'Fable limit' },
+  'claude.limit.overage': { zh: '额外用量额度', en: 'usage credit limit' },
   'claude.overageUsing': {
     zh: '注意：该 Claude 账户正在使用 Extra Usage（超出订阅额度的按量用量），可能产生额外费用。',
     en: 'Note: this Claude account is using Extra Usage (pay-as-you-go beyond the subscription), which may cost extra.',
@@ -311,6 +319,12 @@ export function permissionLabel(runtimeKind: string, mode: string | null): Notic
   return { code: isNoticeCode(own) ? own : (`perm.${mode}` as NoticeCode) };
 }
 
+/** Claude Code's name for a subscription limit (its rate_limit_event `rateLimitType`); unknown types stay as sent. */
+export function claudeLimitName(type: unknown): NoticeText | string {
+  const code = `claude.limit.${String(type)}`;
+  return isNoticeCode(code) ? { code } : String(type ?? '?');
+}
+
 /** Builds a NoticeText (drops null/undefined params so optional fragments just disappear). */
 export function N(code: NoticeCode, params?: Record<string, NoticeValue | null | undefined>): NoticeText {
   if (!params) return { code };
@@ -351,7 +365,14 @@ function renderValue(v: NoticeValue | null | undefined, lang: NoticeLang): strin
 /** The text in one language. Unknown codes (from a newer server) render as nothing; callers fall back to the body. */
 export function renderNotice(n: NoticeText, lang: NoticeLang): string {
   const tpl = 'code' in n ? (isNoticeCode(n.code) ? T[n.code][lang] : '') : typeof n[lang] === 'string' ? n[lang] : '';
-  return tpl.replace(/\{(\w+)\}/g, (_, k: string) => renderValue(n.params?.[k], lang));
+  return tpl.replace(/\{(\w+)\}/g, (_, k: string) => {
+    const v = n.params?.[k];
+    // Notices stored before the limit names were translated carry Claude Code's raw type (e.g. "seven_day").
+    if (k === 'type' && typeof v === 'string' && 'code' in n && (n.code === 'claude.quotaWarning' || n.code === 'claude.quotaReached')) {
+      return renderValue(claudeLimitName(v), lang);
+    }
+    return renderValue(v, lang);
+  });
 }
 
 /** Chinese rendering: what the server stores as the message body. */

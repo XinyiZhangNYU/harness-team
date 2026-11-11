@@ -141,6 +141,25 @@ function noticeEvent(n: NoticeText): { type: 'notice'; text: string; notice: Not
 }
 
 
+/**
+ * How the adapter answers a runtime-specific agent→client request (an ACP extension method such as Cursor's
+ * `cursor/create_plan`):
+ * - `answer`: replied at once with `result`; `activity` (if any) is shown in the turn's activity list.
+ * - `approval`: shown in the chat as an approval card; `answer` builds the reply for the user's decision, and for
+ *   `cancelled` (no turn running, an interrupt, the turn ending first). Nothing is ever accepted without a click.
+ */
+export type ExtensionReply =
+  | { kind: 'answer'; result: unknown; activity?: { title: NoticeText; detail: string | null } }
+  | {
+      kind: 'approval';
+      title: NoticeText;
+      detail: string | null;
+      /** The runtime's own names of the two answers (shown as the decision). */
+      allowName: string;
+      rejectName: string;
+      answer: (decision: 'allow' | 'reject' | 'cancelled') => unknown;
+    };
+
 // ---------------------------------------------------------------------------------------------------------------
 // Adapter
 
@@ -296,6 +315,14 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
   /** Runtime-specific arguments after the ones that start the server. */
   protected extraArgs(_withHttpMcp: boolean): string[] {
     return [];
+  }
+
+  /**
+   * A runtime-specific agent→client request (not session/request_permission). null = not provided (answered with
+   * "method not found").
+   */
+  extensionRequest(_method: string, _params: any): ExtensionReply | null {
+    return null;
   }
 
   /** Why skip-permissions cannot be used with this runtime (null = it can). */
@@ -1348,6 +1375,27 @@ export class AcpSession implements AgentSession {
       } catch {}
       return;
     }
+    let ext: ExtensionReply | null = null;
+    try {
+      ext = this.adapter.extensionRequest(method, p);
+    } catch {
+      ext = null;
+    }
+    if (ext?.kind === 'approval') {
+      // Shown only for the turn running on this process; otherwise nothing may be accepted.
+      if (rpc === this.rpc && this.turn && this.turn.onExtensionApproval(id, method, ext)) return;
+      try {
+        rpc.respond(id, ext.answer('cancelled'));
+      } catch {}
+      return;
+    }
+    if (ext) {
+      try {
+        rpc.respond(id, ext.result);
+      } catch {}
+      if (ext.activity && rpc === this.rpc) this.turn?.noteActivity(String(id), ext.activity.title, ext.activity.detail);
+      return;
+    }
     // fs / terminal were not offered in clientCapabilities.
     try {
       rpc.respondError(id, -32601, `Harness Team does not provide ${method}`);
@@ -1379,6 +1427,13 @@ interface PendingPermission {
   id: RpcId;
   allow: string | null;
   reject: string | null;
+  /** An extension request shown as an approval (ExtensionReply 'approval'): builds its reply. */
+  answer?: (decision: 'allow' | 'reject' | 'cancelled') => unknown;
+}
+
+/** The reply that cancels a pending request without approving anything. */
+function cancelReply(p: PendingPermission): unknown {
+  return p.answer ? p.answer('cancelled') : { outcome: { outcome: 'cancelled' } };
 }
 
 const ACTIVITY_OF: Record<string, ActivityKind> = {
@@ -1501,7 +1556,7 @@ class AcpTurn {
   private end(r: TurnResult) {
     if (this.finished) return;
     for (const [key, p] of this.pending) {
-      this.rpc.respond(p.id, { outcome: { outcome: 'cancelled' } });
+      this.rpc.respond(p.id, cancelReply(p));
       this.sink({ type: 'approval.resolved', nativeRequestId: key, decision: 'cancelled' });
     }
     this.pending.clear();
@@ -1525,7 +1580,7 @@ class AcpTurn {
     this.pending.clear();
     for (const [, p] of answered) {
       try {
-        this.rpc.respond(p.id, { outcome: { outcome: 'cancelled' } });
+        this.rpc.respond(p.id, cancelReply(p));
       } catch {}
     }
     try {
@@ -1556,6 +1611,13 @@ class AcpTurn {
     if (this.signal.aborted || this.cancelling) return { ok: false, error: REQUEST_INTERRUPTED };
     if (decision === 'allow_session' || (decision === 'allow' && !p.allow)) return { ok: false, error: unsupportedDecision('session/request_permission', decision) };
     this.pending.delete(key);
+    if (p.answer) {
+      const allowed = decision === 'allow';
+      this.rpc.respond(p.id, p.answer(allowed ? 'allow' : 'reject'));
+      const native = (allowed ? p.allow : p.reject) ?? decision;
+      this.emit({ type: 'approval.resolved', nativeRequestId: key, decision: native });
+      return { ok: true, nativeDecision: native };
+    }
     if (decision === 'allow') {
       this.rpc.respond(p.id, { outcome: { outcome: 'selected', optionId: p.allow } });
       this.emit({ type: 'approval.resolved', nativeRequestId: key, decision: p.allow });
@@ -1589,6 +1651,46 @@ class AcpTurn {
       this.cancel();
     }
     return true;
+  }
+
+  /**
+   * A runtime-specific request shown as an approval card (a plan to accept, ...). Like onPermission: a card that cannot
+   * be shown is answered "cancelled" and the turn fails with the reason.
+   */
+  onExtensionApproval(id: RpcId, method: string, ext: Extract<ExtensionReply, { kind: 'approval' }>): boolean {
+    if (this.finished || this.signal.aborted || this.cancelling) return false;
+    const key = String(id);
+    try {
+      this.pending.set(key, { id, allow: ext.allowName, reject: ext.rejectName, answer: ext.answer });
+      this.flushText();
+      this.emit({
+        type: 'approval.requested',
+        nativeRequestId: key,
+        nativeMethod: method,
+        itemId: null,
+        ...titled(ext.title),
+        reason: null,
+        detail: clip(ext.detail ? redactText(ext.detail) : null),
+        options: ['allow', 'deny'],
+      });
+    } catch (e) {
+      this.pending.delete(key);
+      try {
+        this.rpc.respond(id, ext.answer('cancelled'));
+      } catch {}
+      this.failure = this.t('无法在聊天中显示 {name} 的审批请求（{error}）：已拒绝该请求并取消本回合', 'Could not show the {name} approval request in the chat ({error}): the request was refused and the turn cancelled', {
+        error: errText(e),
+      });
+      this.cancel();
+    }
+    return true;
+  }
+
+  /** A finished activity line (a runtime-specific request answered at once). */
+  noteActivity(id: string, title: NoticeText, detail: string | null) {
+    if (this.finished) return;
+    this.flushText();
+    this.emit({ type: 'activity', itemId: `ext:${this.turnId}:${id}`, activity: 'other', ...titled(title), detail: clip(detail ? redactText(detail) : null), nativeStatus: null, done: true });
   }
 
   private showPermission(id: RpcId, key: string, p: any) {

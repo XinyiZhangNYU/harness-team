@@ -19,7 +19,7 @@ import type {
   RuntimeBilling,
 } from '../../../../shared/protocol.ts';
 import { PERMISSION_MODES } from '../../../../shared/protocol.ts';
-import { L, type Localized, N, NoticeError, type NoticeText, zhText } from '../../../../shared/notices.ts';
+import { claudeLimitName, L, type Localized, N, NoticeError, type NoticeText, zhText } from '../../../../shared/notices.ts';
 import {
   cwdKey as dirKey,
   denyText,
@@ -1420,11 +1420,11 @@ class ClaudeTurn {
     this.rateLimit = info;
     if (info.status === 'rejected' && !this.quotaNoticed) {
       this.quotaNoticed = true;
-      this.emit(noticeEvent(N('claude.quotaReached', { type: info.rateLimitType ?? '?', reset: info.resetsAt ? N('claude.quotaReset', { time: fmtTime(info.resetsAt) }) : null })));
+      this.emit(noticeEvent(N('claude.quotaReached', { type: claudeLimitName(info.rateLimitType), reset: info.resetsAt ? N('claude.quotaReset', { time: fmtTime(info.resetsAt) }) : null })));
     } else if (info.status === 'allowed_warning') {
       this.emit(
         noticeEvent(
-          N('claude.quotaWarning', { type: info.rateLimitType ?? '?', used: typeof info.utilization === 'number' ? N('claude.quotaUsed', { pct: Math.round(info.utilization * 100) }) : null }),
+          N('claude.quotaWarning', { type: claudeLimitName(info.rateLimitType), used: typeof info.utilization === 'number' ? N('claude.quotaUsed', { pct: Math.round(info.utilization * 100) }) : null }),
         ),
       );
     }
@@ -1516,7 +1516,7 @@ class ClaudeTurn {
         'Claude 订阅额度已用尽（{kind}{reset}）。Harness Team 不会切换到 API Key 或其他付费方式，请等待额度恢复。原始信息：{raw}',
         'The Claude subscription limit is used up ({kind}{reset}). Harness Team never switches to an API key or other paid options; wait for the limit to reset. Original message: {raw}',
         {
-          kind: this.rateLimit?.rateLimitType ?? '?',
+          kind: claudeLimitName(this.rateLimit?.rateLimitType),
           reset: this.rateLimit?.resetsAt ? L('，约 {at} 重置', ', resets around {at}', { at: fmtTime(this.rateLimit.resetsAt) }) : null,
           raw,
         },

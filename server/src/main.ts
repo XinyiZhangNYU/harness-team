@@ -20,6 +20,8 @@ const { values } = parseArgs({
     'no-antigravity': { type: 'boolean', default: false },
     'no-dsh': { type: 'boolean', default: false },
     'no-opencode': { type: 'boolean', default: false },
+    'no-cursor': { type: 'boolean', default: false },
+    'no-grok': { type: 'boolean', default: false },
   },
 });
 
@@ -39,11 +41,15 @@ const detectOpts = {
   antigravity: !values['no-antigravity'],
   dsh: !values['no-dsh'],
   opencode: !values['no-opencode'],
+  cursor: !values['no-cursor'],
+  grok: !values['no-grok'],
   codexProtocolLog: process.env.HT_CODEX_PROTOCOL_LOG || undefined,
   claudeProtocolLog: process.env.HT_CLAUDE_PROTOCOL_LOG || undefined,
   antigravityProtocolLog: process.env.HT_ANTIGRAVITY_PROTOCOL_LOG || undefined,
   dshProtocolLog: process.env.HT_DSH_PROTOCOL_LOG || undefined,
   opencodeProtocolLog: process.env.HT_OPENCODE_PROTOCOL_LOG || undefined,
+  cursorProtocolLog: process.env.HT_CURSOR_PROTOCOL_LOG || undefined,
+  grokProtocolLog: process.env.HT_GROK_PROTOCOL_LOG || undefined,
 };
 const found = await detectRuntimes(detectOpts);
 const codex = found.codex.detection;
@@ -64,7 +70,9 @@ try {
   antigravity: found.antigravity.options ?? null,
   dsh: found.dsh.options ?? null,
   opencode: found.opencode.options ?? null,
-  missingRuntimes: { codex: found.codex.missing, claude: found.claude.missing, antigravity: found.antigravity.missing, dsh: found.dsh.missing, opencode: found.opencode.missing },
+  cursor: found.cursor.options ?? null,
+  grok: found.grok.options ?? null,
+  missingRuntimes: { codex: found.codex.missing, claude: found.claude.missing, antigravity: found.antigravity.missing, dsh: found.dsh.missing, opencode: found.opencode.missing, cursor: found.cursor.missing, grok: found.grok.missing },
   detectRuntimes: () => detectRuntimes(detectOpts),
   secrets: parentPort ? parentPortSecretBox(parentPort) : null,
   });
@@ -120,6 +128,20 @@ if (found.opencode.options) {
   if (process.env.HT_OPENCODE_PROTOCOL_LOG) console.log(`  Raw OpenCode ACP protocol log: ${process.env.HT_OPENCODE_PROTOCOL_LOG}`);
 } else {
   console.log(`OpenCode runtime: not available (${localized(found.opencode.missing!, 'en')})`);
+}
+if (found.cursor.options) {
+  const d = found.cursor.detection!;
+  console.log(`Cursor runtime: ${d.version ?? 'version reported at initialize'} (${[d.command, ...d.argsPrefix].join(' ')}, acp) - counts against your Cursor plan`);
+  if (process.env.HT_CURSOR_PROTOCOL_LOG) console.log(`  Raw Cursor ACP protocol log: ${process.env.HT_CURSOR_PROTOCOL_LOG}`);
+} else {
+  console.log(`Cursor runtime: not available (${localized(found.cursor.missing!, 'en')})`);
+}
+if (found.grok.options) {
+  const d = found.grok.detection!;
+  console.log(`Grok runtime: ${d.version ?? 'version reported at initialize'} (${[d.command, ...d.argsPrefix].join(' ')}, agent stdio) - counts against your Grok plan`);
+  if (process.env.HT_GROK_PROTOCOL_LOG) console.log(`  Raw Grok ACP protocol log: ${process.env.HT_GROK_PROTOCOL_LOG}`);
+} else {
+  console.log(`Grok runtime: not available (${localized(found.grok.missing!, 'en')})`);
 }
 console.log('Mock agents are simulated.');
 

@@ -620,6 +620,78 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE avatar_defaults_v26 RENAME TO avatar_defaults;
     `,
   },
+  {
+    version: 27,
+    name: 'cursor runtime',
+    // Cursor (official ACP server, `cursor-agent acp`) as a runtime kind: the runtime_kind CHECKs are rebuilt with the
+    // same columns and rows.
+    rebuildsReferencedTable: true,
+    sql: `
+      CREATE TABLE agents_v27 (
+        id                     TEXT PRIMARY KEY,
+        handle                 TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name           TEXT NOT NULL,
+        runtime_kind           TEXT NOT NULL CHECK (runtime_kind IN ('mock','codex','claude','antigravity','dsh','opencode','cursor','chat')),
+        is_mock                INTEGER NOT NULL CHECK (is_mock IN (0,1)),
+        config_json            TEXT NOT NULL DEFAULT '{}',
+        created_at             TEXT NOT NULL,
+        deleted_at             TEXT,
+        provider_id            TEXT,
+        collab_mode            TEXT CHECK (collab_mode IN ('restricted','full')),
+        collab_confirmed_at    TEXT,
+        collab_warning_version TEXT,
+        CHECK ((runtime_kind = 'antigravity') = (collab_mode IS NOT NULL))
+      );
+      INSERT INTO agents_v27 (id, handle, display_name, runtime_kind, is_mock, config_json, created_at, deleted_at, provider_id, collab_mode, collab_confirmed_at, collab_warning_version)
+        SELECT id, handle, display_name, runtime_kind, is_mock, config_json, created_at, deleted_at, provider_id, collab_mode, collab_confirmed_at, collab_warning_version FROM agents;
+      DROP TABLE agents;
+      ALTER TABLE agents_v27 RENAME TO agents;
+      CREATE TABLE avatar_defaults_v27 (
+        runtime_kind TEXT PRIMARY KEY CHECK (runtime_kind IN ('codex','claude','antigravity','dsh','opencode','cursor') OR runtime_kind LIKE 'chat:%'),
+        avatar       TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+      INSERT INTO avatar_defaults_v27 (runtime_kind, avatar, updated_at) SELECT runtime_kind, avatar, updated_at FROM avatar_defaults;
+      DROP TABLE avatar_defaults;
+      ALTER TABLE avatar_defaults_v27 RENAME TO avatar_defaults;
+    `,
+  },
+  {
+    version: 28,
+    name: 'grok runtime',
+    // Grok Build (official ACP server, `grok agent stdio`) as a runtime kind: the runtime_kind CHECKs are rebuilt with
+    // the same columns and rows.
+    rebuildsReferencedTable: true,
+    sql: `
+      CREATE TABLE agents_v28 (
+        id                     TEXT PRIMARY KEY,
+        handle                 TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name           TEXT NOT NULL,
+        runtime_kind           TEXT NOT NULL CHECK (runtime_kind IN ('mock','codex','claude','antigravity','dsh','opencode','cursor','grok','chat')),
+        is_mock                INTEGER NOT NULL CHECK (is_mock IN (0,1)),
+        config_json            TEXT NOT NULL DEFAULT '{}',
+        created_at             TEXT NOT NULL,
+        deleted_at             TEXT,
+        provider_id            TEXT,
+        collab_mode            TEXT CHECK (collab_mode IN ('restricted','full')),
+        collab_confirmed_at    TEXT,
+        collab_warning_version TEXT,
+        CHECK ((runtime_kind = 'antigravity') = (collab_mode IS NOT NULL))
+      );
+      INSERT INTO agents_v28 (id, handle, display_name, runtime_kind, is_mock, config_json, created_at, deleted_at, provider_id, collab_mode, collab_confirmed_at, collab_warning_version)
+        SELECT id, handle, display_name, runtime_kind, is_mock, config_json, created_at, deleted_at, provider_id, collab_mode, collab_confirmed_at, collab_warning_version FROM agents;
+      DROP TABLE agents;
+      ALTER TABLE agents_v28 RENAME TO agents;
+      CREATE TABLE avatar_defaults_v28 (
+        runtime_kind TEXT PRIMARY KEY CHECK (runtime_kind IN ('codex','claude','antigravity','dsh','opencode','cursor','grok') OR runtime_kind LIKE 'chat:%'),
+        avatar       TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+      INSERT INTO avatar_defaults_v28 (runtime_kind, avatar, updated_at) SELECT runtime_kind, avatar, updated_at FROM avatar_defaults;
+      DROP TABLE avatar_defaults;
+      ALTER TABLE avatar_defaults_v28 RENAME TO avatar_defaults;
+    `,
+  },
 ];
 
 /**

@@ -7,6 +7,8 @@ import { extraBinDirs, loginShellPath, mergePath } from './adapters/cli-path.ts'
 import { type CodexAdapterOptions, type CodexDetection, detectCodex } from './adapters/codex/adapter.ts';
 import { type DshAdapterOptions, type DshDetection, detectDsh } from './adapters/dsh/adapter.ts';
 import { type OpenCodeAdapterOptions, type OpenCodeDetection, detectOpenCode } from './adapters/opencode/adapter.ts';
+import { type CursorAdapterOptions, type CursorDetection, detectCursor } from './adapters/cursor/adapter.ts';
+import { type GrokAdapterOptions, type GrokDetection, detectGrok } from './adapters/grok/adapter.ts';
 import { redactText } from './redact.ts';
 
 /**
@@ -23,6 +25,8 @@ export interface DetectedRuntimes {
   antigravity: Detected<AntigravityAdapterOptions> & { detection: AntigravityDetection | null };
   dsh: Detected<DshAdapterOptions> & { detection: DshDetection | null };
   opencode: Detected<OpenCodeAdapterOptions> & { detection: OpenCodeDetection | null };
+  cursor: Detected<CursorAdapterOptions> & { detection: CursorDetection | null };
+  grok: Detected<GrokAdapterOptions> & { detection: GrokDetection | null };
 }
 
 export interface DetectOptions {
@@ -34,11 +38,17 @@ export interface DetectOptions {
   dsh?: boolean;
   /** Absent = true. */
   opencode?: boolean;
+  /** Absent = true. */
+  cursor?: boolean;
+  /** Absent = true. */
+  grok?: boolean;
   codexProtocolLog?: string;
   claudeProtocolLog?: string;
   antigravityProtocolLog?: string;
   dshProtocolLog?: string;
   opencodeProtocolLog?: string;
+  cursorProtocolLog?: string;
+  grokProtocolLog?: string;
 }
 
 const notice = (x: Localized): NoticeText => (typeof x === 'string' ? L(x, x) : x);
@@ -58,12 +68,14 @@ async function isolated<T>(name: string, detect: () => Promise<T>): Promise<T> {
 
 export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes> {
   await widenPath().catch(() => {});
-  const [codex, claude, antigravity, dsh, opencode] = await Promise.all([
+  const [codex, claude, antigravity, dsh, opencode, cursor, grok] = await Promise.all([
     o.codex ? isolated('codex', () => detectCodex()) : null,
     o.claude ? isolated('claude', () => detectClaude()) : null,
     o.antigravity !== false ? isolated('agy', () => detectAntigravity()) : null,
     o.dsh !== false ? isolated('dsh', () => detectDsh()) : null,
     o.opencode !== false ? isolated('opencode', () => detectOpenCode()) : null,
+    o.cursor !== false ? isolated('cursor-agent', () => detectCursor()) : null,
+    o.grok !== false ? isolated('grok', () => detectGrok()) : null,
   ]);
   return {
     codex: !codex
@@ -129,6 +141,22 @@ export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes
         : {
             options: { command: opencode.command, argsPrefix: opencode.argsPrefix, version: opencode.version, problem: null, protocolLog: o.opencodeProtocolLog },
             detection: opencode,
+          },
+    cursor: !cursor
+      ? { missing: L('已用 --no-cursor 停用', 'Disabled with --no-cursor'), detection: null }
+      : !cursor.command || cursor.error
+        ? { missing: notice(cursor.error ?? L('未找到 cursor-agent', 'cursor-agent was not found')), detection: cursor }
+        : {
+            options: { command: cursor.command, argsPrefix: cursor.argsPrefix, installRoot: cursor.installRoot ?? null, version: cursor.version, problem: null, protocolLog: o.cursorProtocolLog },
+            detection: cursor,
+          },
+    grok: !grok
+      ? { missing: L('已用 --no-grok 停用', 'Disabled with --no-grok'), detection: null }
+      : !grok.command || grok.error
+        ? { missing: notice(grok.error ?? L('未找到 grok', 'grok was not found')), detection: grok }
+        : {
+            options: { command: grok.command, argsPrefix: grok.argsPrefix, version: grok.version, problem: null, protocolLog: o.grokProtocolLog },
+            detection: grok,
           },
   };
 }

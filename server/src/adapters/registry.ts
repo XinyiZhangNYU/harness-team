@@ -65,6 +65,26 @@ const PLANNED: Record<Exclude<RuntimeKind, 'mock'>, RuntimeDescriptor> = {
     requiresWorkspace: true,
     capabilities: NO_CAPABILITIES,
   },
+  grok: {
+    kind: 'grok',
+    label: 'Grok',
+    isMock: false,
+    available: false,
+    installed: false,
+    note: L('未启用：本次启动未注册 Grok 运行时（未找到 grok，或使用了 --no-grok）。', 'Not enabled: no Grok runtime was registered in this run (grok was not found, or --no-grok was used).'),
+    requiresWorkspace: true,
+    capabilities: NO_CAPABILITIES,
+  },
+  cursor: {
+    kind: 'cursor',
+    label: 'Cursor',
+    isMock: false,
+    available: false,
+    installed: false,
+    note: L('未启用：本次启动未注册 Cursor 运行时（未找到 cursor-agent，或使用了 --no-cursor）。', 'Not enabled: no Cursor runtime was registered in this run (cursor-agent was not found, or --no-cursor was used).'),
+    requiresWorkspace: true,
+    capabilities: NO_CAPABILITIES,
+  },
   chat: {
     kind: 'chat',
     label: 'Chat',
@@ -101,7 +121,7 @@ export class AdapterRegistry {
   }
 
   describeAll(): RuntimeDescriptor[] {
-    const kinds: RuntimeKind[] = ['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'chat'];
+    const kinds: RuntimeKind[] = ['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'chat'];
     return kinds.map((k) => {
       const a = this.adapters.get(k);
       if (a) return a.describe();

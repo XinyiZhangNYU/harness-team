@@ -194,7 +194,7 @@ export function instructionsVersion(text: string): string {
 const TRIGGER_MAX = 12_000;
 const CONTEXT_MAX = 1_500;
 
-const RUNTIME_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', dsh: 'DeepSeek Harness', opencode: 'OpenCode', chat: 'Chat API', mock: 'Mock' };
+const RUNTIME_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', dsh: 'DeepSeek Harness', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok', chat: 'Chat API', mock: 'Mock' };
 
 export interface EnvelopeInput {
   room: Room;

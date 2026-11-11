@@ -257,7 +257,7 @@ function PermissionField(props: {
   // A saved mode this build does not offer (cannot normally happen) stays visible instead of silently changing.
   const unknown = props.value && !modes.includes(props.value as PermissionMode);
   const help = props.value
-    ? ((props.runtimeKind === 'opencode' ? `permHelp.opencode.${props.value}` : `permHelp.${props.value}`) as Parameters<TFunc>[0])
+    ? ((props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' ? `permHelp.${props.runtimeKind}.${props.value}` : `permHelp.${props.value}`) as Parameters<TFunc>[0])
     : 'permHelp.follow';
   return (
     <div className="field">
@@ -941,6 +941,8 @@ export function MembersPanel(props: {
             setAdding(false);
             setFlash(t('members.added', { handle: a.handle }));
           }}
+          onEdit={(a) => setOpenId(a.id)}
+          onDelete={setDeleting}
         />
       )}
       {removing && (
@@ -1043,10 +1045,23 @@ function AddMemberDialog(props: {
   runtimes: RuntimeDescriptor[];
   onClose: () => void;
   onAdded: (a: AgentWithStatus) => void;
+  /** Settings and deletion of an existing member; both apply to every chat it is in. */
+  onEdit: (a: AgentWithStatus) => void;
+  onDelete: (a: AgentWithStatus) => void;
 }) {
   const t = useT();
   const [tab, setTab] = useState<'new' | 'existing'>('new');
-  const [pick, setPick] = useState('');
+  const [chosen, setPick] = useState('');
+  // A member deleted meanwhile is no longer picked.
+  const pick = props.others.some((x) => x.id === chosen) ? chosen : '';
+  const [menu, setMenu] = useState<MemberMenu | null>(null);
+  const openMenu = (a: AgentWithStatus, e: React.MouseEvent, anchor?: HTMLElement) => {
+    e.preventDefault();
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      setMenu({ agent: a, x: rect.right - 4, y: rect.bottom + 2 });
+    } else setMenu({ agent: a, x: e.clientX, y: e.clientY });
+  };
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [canCreate, setCanCreate] = useState(false);
@@ -1117,7 +1132,7 @@ function AddMemberDialog(props: {
         >
           <ul className="pick-list">
             {props.others.map((a) => (
-              <li key={a.id}>
+              <li key={a.id} className={`pick-row${menu?.agent.id === a.id ? ' menu-open' : ''}`} onContextMenu={(e) => openMenu(a, e)}>
                 <label className={`choice${pick === a.id ? ' on' : ''}`}>
                   <input type="radio" name="pick" checked={pick === a.id} onChange={() => setPick(a.id)} />
                   <AgentAvatar agent={a} />
@@ -1132,11 +1147,34 @@ function AddMemberDialog(props: {
                     )}
                   </span>
                 </label>
+                <button
+                  type="button"
+                  className="icon-btn member-more"
+                  aria-label={t('members.menu', { name: a.displayName })}
+                  aria-haspopup="menu"
+                  aria-expanded={menu?.agent.id === a.id}
+                  data-menu-toggle
+                  onClick={(e) => (menu?.agent.id === a.id ? setMenu(null) : openMenu(a, e, e.currentTarget))}
+                >
+                  <Icon name="more" />
+                </button>
               </li>
             ))}
           </ul>
           {error && <div className="error-text">{error}</div>}
         </form>
+      )}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          label={t('members.menu', { name: menu.agent.displayName })}
+          items={[
+            { label: t('members.details'), onSelect: () => props.onEdit(menu.agent) },
+            { label: t('members.deleteMember'), danger: true, separator: true, onSelect: () => props.onDelete(menu.agent) },
+          ]}
+          onClose={() => setMenu(null)}
+        />
       )}
       {(anyRunnable || !showNew) && <DefaultReplyCheck checked={defaultReply} onChange={setDefaultReply} />}
     </Dialog>
@@ -1633,10 +1671,12 @@ function AgentDialog(props: {
       onClose={props.onClose}
       actions={
         <>
-          <button type="button" className="push-left" onClick={props.onRemove}>
-            {t('members.remove')}
-          </button>
-          <button type="button" className="danger-outline" onClick={props.onDelete}>
+          {props.roomId && (
+            <button type="button" className="push-left" onClick={props.onRemove}>
+              {t('members.remove')}
+            </button>
+          )}
+          <button type="button" className={`danger-outline${props.roomId ? '' : ' push-left'}`} onClick={props.onDelete}>
             {t('members.deleteMember')}
           </button>
           <button type="submit" form="agent-form" className="primary" disabled={busy || !dirty || !displayName.trim()}>

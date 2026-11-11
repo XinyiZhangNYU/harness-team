@@ -10,6 +10,8 @@ import type { ServerEvent } from '../../shared/protocol.ts';
 import { AntigravityAdapter, type AntigravityAdapterOptions } from './adapters/antigravity/adapter.ts';
 import { DshAdapter, type DshAdapterOptions } from './adapters/dsh/adapter.ts';
 import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode/adapter.ts';
+import { CursorAdapter, type CursorAdapterOptions } from './adapters/cursor/adapter.ts';
+import { GrokAdapter, type GrokAdapterOptions } from './adapters/grok/adapter.ts';
 import { ClaudeAdapter, type ClaudeAdapterOptions } from './adapters/claude/adapter.ts';
 import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex/adapter.ts';
 import { MockAdapter } from './adapters/mock.ts';
@@ -37,7 +39,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.10.1';
+export const SERVER_VERSION = '0.11.0';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -60,8 +62,12 @@ export interface AppOptions {
   dsh?: DshAdapterOptions | null;
   /** Register OpenCode through its official ACP runtime (`opencode acp`). Omitted = unavailable. */
   opencode?: OpenCodeAdapterOptions | null;
+  /** Register Cursor through its official ACP runtime (`cursor-agent acp`). Omitted = unavailable. */
+  cursor?: CursorAdapterOptions | null;
+  /** Register Grok Build through its official ACP runtime (`grok agent stdio`). Omitted = unavailable. */
+  grok?: GrokAdapterOptions | null;
   /** Why a real runtime has no adapter at start (shown on its card in the add-member form). */
-  missingRuntimes?: { codex?: NoticeText; claude?: NoticeText; antigravity?: NoticeText; dsh?: NoticeText; opencode?: NoticeText };
+  missingRuntimes?: { codex?: NoticeText; claude?: NoticeText; antigravity?: NoticeText; dsh?: NoticeText; opencode?: NoticeText; cursor?: NoticeText; grok?: NoticeText };
   /** Detects the CLIs again (POST /api/runtimes/detect), so installing or logging in needs no restart. */
   detectRuntimes?: () => Promise<DetectedRuntimes>;
   /** Serve the built-in Team MCP to real runtimes (default true). */
@@ -108,7 +114,7 @@ const CreateRoom = z.object({
   projectDir: z.string().max(1000).nullable().optional(),
   agentLanguage: AgentLanguageSchema.optional(),
 });
-const RuntimeKindSchema = z.enum(['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'chat']);
+const RuntimeKindSchema = z.enum(['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'chat']);
 /** Any mode a runtime offers (PERMISSION_MODES); the Core checks it belongs to the member's runtime. */
 const PermissionModeSchema = z.enum([
   'manual',
@@ -126,6 +132,8 @@ const PermissionModeSchema = z.enum([
   'accept-edits',
   'skip-permissions',
   'build',
+  'agent',
+  'ask',
 ]);
 const CreateAgent = z.object({
   handle: z.string().max(100).nullable().optional(),
@@ -249,10 +257,12 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
   if (opts.antigravity) registry.register(new AntigravityAdapter(opts.antigravity));
   if (opts.dsh) registry.register(new DshAdapter(opts.dsh));
   if (opts.opencode) registry.register(new OpenCodeAdapter(opts.opencode));
+  if (opts.cursor) registry.register(new CursorAdapter(opts.cursor));
+  if (opts.grok) registry.register(new GrokAdapter(opts.grok));
   const chatProviders = new ChatProviders(db, new KeyFiles(opts.dataDir, opts.secrets ?? null));
   let chatHost: ChatHost | null = null;
   registry.register(new ChatAdapter({ db, providers: chatProviders, dataDir: opts.dataDir, host: () => chatHost, idleMs: opts.chatIdleMs }));
-  for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode'] as const) {
+  for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok'] as const) {
     const why = opts.missingRuntimes?.[kind];
     if (why && !registry.get(kind)) registry.setMissing(kind, why);
   }
@@ -316,6 +326,20 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       registry.setMissing('opencode', null);
     } else if (oc instanceof OpenCodeAdapter) oc.update({ problem: found.opencode.missing });
     else registry.setMissing('opencode', found.opencode.missing);
+    const cur = registry.get('cursor');
+    if (found.cursor.options) {
+      if (cur instanceof CursorAdapter) cur.update(found.cursor.options);
+      else registry.register(new CursorAdapter(found.cursor.options));
+      registry.setMissing('cursor', null);
+    } else if (cur instanceof CursorAdapter) cur.update({ problem: found.cursor.missing });
+    else registry.setMissing('cursor', found.cursor.missing);
+    const gk = registry.get('grok');
+    if (found.grok.options) {
+      if (gk instanceof GrokAdapter) gk.update(found.grok.options);
+      else registry.register(new GrokAdapter(found.grok.options));
+      registry.setMissing('grok', null);
+    } else if (gk instanceof GrokAdapter) gk.update({ problem: found.grok.missing });
+    else registry.setMissing('grok', found.grok.missing);
     core.runtimesChanged();
     bus.publish({ type: 'runtimes.updated', runtimes: registry.describeAll() });
   }
