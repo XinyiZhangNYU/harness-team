@@ -1,7 +1,7 @@
 import type { ChatApiFormat, ChatModelFields, ChatPreset } from '../../../../shared/protocol.ts';
 
 /**
- * Presets and the known-model table of chat members (docs/MODEL_PROVIDERS_PRESETS.md, checked 2026-11-10). A preset is
+ * Presets and the known-model table of chat members (docs/MODEL_PROVIDERS_PRESETS.md, checked 2026-11-11). A preset is
  * only a filled-in template: nothing here is vendor code. Recommended model values are looked up by model id, Base URL
  * and format, and follow this table when it changes; fields the user set by hand do not (see providers.ts).
  */
@@ -45,7 +45,7 @@ export const CHAT_PRESETS: ChatPreset[] = [
     format: 'gemini',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     vertex: false,
-    models: ['gemini-4-argon', 'gemini-3.8-flash'],
+    models: ['gemini-4-argon', 'gemini-4-carbon', 'gemini-3.8-flash'],
   },
   {
     id: 'vertex',
@@ -53,8 +53,9 @@ export const CHAT_PRESETS: ChatPreset[] = [
     format: 'gemini',
     baseUrl: 'https://aiplatform.googleapis.com/v1',
     vertex: true,
-    // gemini-4-argon is served only in the global location, which needs a project ID (checked 2026-11-10).
-    models: ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
+    // gemini-4-argon and gemini-4-carbon are served only in the global location, which needs a project ID (checked
+    // 2026-11-10 and 2026-11-11).
+    models: ['gemini-4-argon', 'gemini-4-carbon', 'gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
   },
 ];
 
@@ -170,7 +171,7 @@ const KNOWN: Known[] = [
   // Thinking levels per Google's thinking guide (aistudio.google.com/docs/thinking): only 3 Flash Preview takes
   // `minimal`. 3.1 Flash-Lite is not listed there; it keeps the levels of the other Flash models.
   {
-    ids: ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
+    ids: ['gemini-4-argon', 'gemini-4-carbon', 'gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
     formats: ['gemini'],
     fields: { contextTokens: 1_048_576, maxOutputTokens: 65_536, image: true, pdf: true, webSearch: true, reasoningLevels: ['low', 'medium', 'high'], reasoningMapping: GEMINI_MAPPING },
   },

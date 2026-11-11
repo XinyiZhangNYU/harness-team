@@ -63,6 +63,7 @@ const OPENAI: Record<string, Period[]> = {
 
 const GEMINI: Record<string, Period[]> = {
   'gemini-4-argon': [{ until: '2026-12-01', rate: r(2, 10, 0.1) }, { rate: r(4, 20, 0.2) }],
+  'gemini-4-carbon': [{ until: '2026-12-01', rate: r(2, 10, 0.1) }, { rate: r(4, 20, 0.2) }],
   'gemini-3.8-flash': [{ until: '2027-01-01', rate: r(0.75, 3.75, 0.075) }, { rate: r(1.5, 7.5, 0.15) }],
   'gemini-3.6-flash': [{ until: '2027-01-01', rate: r(0.75, 3.75, 0.075) }, { rate: r(1.5, 7.5, 0.15) }],
   'gemini-3.5-flash-lite': [{ rate: r(0.3, 2.5, 0.03) }],
