@@ -40,7 +40,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.12.0';
+export const SERVER_VERSION = '0.12.1';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -53,6 +53,8 @@ export interface AppOptions {
   mockChunkDelayMs?: number;
   /** Chat members' stream idle limit (tests use a short one). */
   chatIdleMs?: number;
+  /** Tests only: chat members' fetch_url may reach loopback addresses. */
+  chatFetchAllowPrivate?: boolean;
   /** Register the real Codex runtime (official app-server). Omitted = Codex stays unavailable. */
   codex?: CodexAdapterOptions | null;
   /** Register Claude Code through the user's own `claude` CLI (subscription login). Omitted = unavailable. */
@@ -174,6 +176,7 @@ const ChatMemberSchema = z
   .object({
     projectTools: z.boolean(),
     webSearch: z.boolean(),
+    webFetch: z.boolean().default(false),
     dailyTokenLimit: z.number().int().min(0).max(1_000_000_000),
     maxToolRounds: z.number().int().min(1).max(200),
   })
@@ -196,6 +199,7 @@ const SaveChatProvider = z
   })
   .strict();
 const AddChatModel = z.object({ id: z.string().max(200) }).strict();
+const ModelCatalogQuery = z.object({ refresh: z.boolean().optional(), cwd: z.string().max(4096).nullable().optional() }).strict();
 const ConfirmBody = z.object({ confirm: z.boolean().optional() }).passthrough();
 const SaveChatModel = z
   // partialRecord: an enum-keyed z.record is exhaustive and would add every missing field as undefined.
@@ -206,7 +210,7 @@ const SetAvatarDefault = z.object({ avatar: z.string().max(AGENT_AVATAR_MAX).reg
 const AddMember = z.object({ agentId: z.string(), defaultReply: z.boolean().optional() });
 const UpdateMember = z.object({ defaultReply: z.boolean() });
 const ReorderMembers = z.object({ agentIds: z.array(z.string()).max(1000) }).strict();
-const DecideApproval = z.object({ decision: z.enum(['allow', 'allow_session', 'deny']) });
+const DecideApproval = z.object({ decision: z.enum(['allow', 'allow_session', 'allow_prefix', 'allow_all_edits', 'deny']) });
 const ChooseSession = z.object({ choice: z.enum(['restore', 'retry', 'new']) });
 const PostMessage = z.object({
   body: z.string(),
@@ -266,7 +270,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
   if (opts.kimi) registry.register(new KimiAdapter(opts.kimi));
   const chatProviders = new ChatProviders(db, new KeyFiles(opts.dataDir, opts.secrets ?? null));
   let chatHost: ChatHost | null = null;
-  registry.register(new ChatAdapter({ db, providers: chatProviders, dataDir: opts.dataDir, host: () => chatHost, idleMs: opts.chatIdleMs }));
+  registry.register(new ChatAdapter({ db, providers: chatProviders, dataDir: opts.dataDir, host: () => chatHost, idleMs: opts.chatIdleMs, fetchAllowPrivate: opts.chatFetchAllowPrivate }));
   for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi'] as const) {
     const why = opts.missingRuntimes?.[kind];
     if (why && !registry.get(kind)) registry.setMissing(kind, why);
@@ -642,10 +646,11 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       if (key.startsWith('chat:') && !chatProviders.get(key.slice(5))) throw new HttpError(404, 'provider not found');
       return sendJson(res, 200, { defaults: core.setAvatarDefault(key, SetAvatarDefault.parse(await readJson(req)).avatar) });
     }
-    if (a === 'runtimes' && b && c === 'models' && !d && method === 'GET') {
+    // POST, not GET: it starts the harness CLI in `cwd`, and a GET could be sent by an image in a chat message.
+    if (a === 'runtimes' && b && c === 'models' && !d && method === 'POST') {
       const kind = RuntimeKindSchema.parse(b);
-      const cwd = url.searchParams.get('cwd');
-      return sendJson(res, 200, { catalog: await core.modelCatalog(kind, { refresh: url.searchParams.get('refresh') === '1', cwd: cwd || null }) });
+      const { refresh, cwd } = ModelCatalogQuery.parse(await readJson(req));
+      return sendJson(res, 200, { catalog: await core.modelCatalog(kind, { refresh: refresh === true, cwd: cwd || null }) });
     }
     if (a === 'workspaces' && b === 'recent' && !c && method === 'GET') {
       // Project directories the user already worked in with Codex / Claude Code (and existing members), for the

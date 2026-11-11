@@ -8,6 +8,9 @@ import {
   finishHeaders,
   joinUrl,
   loadParts,
+  type LoadedPart,
+  toolMediaParts,
+  TOOL_MEDIA_INTRO,
   parseJson,
   rawFits,
   type SseEvent,
@@ -30,6 +33,13 @@ type Msg = Record<string, Json>;
 
 const auth = (key: string | null): Record<string, string> => (key ? { authorization: `Bearer ${key}` } : {});
 
+const partJson = (p: LoadedPart): Json =>
+  p.type === 'text'
+    ? { type: 'text', text: p.text }
+    : p.type === 'image'
+      ? { type: 'image_url', image_url: { url: `data:${p.mime};base64,${p.data}` } }
+      : { type: 'file', file: { filename: p.name, file_data: `data:application/pdf;base64,${p.data}` } };
+
 export const openaiChat: WireFormat = {
   async build(spec) {
     const messages: Msg[] = [];
@@ -39,13 +49,7 @@ export const openaiChat: WireFormat = {
         messages.push({ role: 'user', content: SUMMARY_PREFIX + it.text });
       } else if (it.role === 'user') {
         const parts = await loadParts(it.parts, spec.model);
-        const content: Json[] = parts.map((p): Json =>
-          p.type === 'text'
-            ? { type: 'text', text: p.text }
-            : p.type === 'image'
-              ? { type: 'image_url', image_url: { url: `data:${p.mime};base64,${p.data}` } }
-              : { type: 'file', file: { filename: p.name, file_data: `data:application/pdf;base64,${p.data}` } },
-        );
+        const content: Json[] = parts.map(partJson);
         const prev = messages[messages.length - 1];
         // Consecutive user messages are merged (some APIs refuse two in a row).
         if (prev?.role === 'user' && Array.isArray(prev.content)) (prev.content as Json[]).push(...content);
@@ -62,6 +66,9 @@ export const openaiChat: WireFormat = {
         messages.push(m);
       } else {
         for (const r of it.results) messages.push({ role: 'tool', tool_call_id: r.callId, content: r.content });
+        // Tool messages take text only: images and PDFs a tool returned follow as a user message.
+        const media = toolMediaParts(it.results, spec.model);
+        if (media.length) messages.push({ role: 'user', content: [{ type: 'text', text: TOOL_MEDIA_INTRO }, ...media.map(partJson)] });
       }
     }
     const max = spec.maxOutputTokens ?? spec.model.maxOutputTokens;

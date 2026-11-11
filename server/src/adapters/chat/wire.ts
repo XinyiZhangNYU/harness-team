@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { ChatApiFormat, ChatModel, ChatProvider } from '../../../../shared/protocol.ts';
 import { redactText } from '../../redact.ts';
 import { extraBodyFor, extraHeadersFor, mappingFor, mergeInto, reasoningOn, SAMPLING_KEYS, type Json } from './body.ts';
+import { DOC_LABEL, docKind, extractDocument, ExtractError, legacyOffice } from './extract.ts';
 
 /**
  * What the four wire formats share: the transcript items a chat member keeps (stored as JSON in chat_items), the
@@ -20,7 +21,11 @@ export interface ToolResult {
   name: string;
   content: string;
   isError?: boolean;
+  /** Images and PDFs the tool returned for the model to see (read_file, fetch_url), base64. */
+  media?: ToolMedia[];
 }
+
+export type ToolMedia = { type: 'image'; mime: string; data: string; name: string } | { type: 'pdf'; data: string; name: string };
 
 export type UserPart =
   | { type: 'text'; text: string }
@@ -295,6 +300,17 @@ export async function loadParts(parts: UserPart[], model: ChatModel): Promise<Lo
       } else if (p.mime === 'application/pdf') {
         if (!model.pdf) note('this model does not accept PDF files');
         else out.push({ type: 'pdf', data: (await readFile(p.path)).toString('base64'), name: p.name });
+      } else if (docKind(p.name, p.mime)) {
+        const kind = docKind(p.name, p.mime)!;
+        try {
+          const { text, truncated } = extractDocument(await readFile(p.path), kind, INLINE_TEXT_MAX);
+          out.push({ type: 'text', text: `[Attachment ${p.name}: text of the ${DOC_LABEL[kind].en}]\n${text}${truncated ? '\n[…truncated]' : ''}` });
+        } catch (e) {
+          if (!(e instanceof ExtractError)) throw e;
+          note(`its text could not be read (${e.message})`);
+        }
+      } else if (legacyOffice(p.name, p.mime)) {
+        note(`the old Office format cannot be read; save it as ${legacyOffice(p.name, p.mime)}`);
       } else if (TEXT_MIME.test(p.mime) || p.mime === 'application/octet-stream') {
         const buf = await readFile(p.path);
         if (!TEXT_MIME.test(p.mime) && !looksLikeText(buf)) {
@@ -310,6 +326,21 @@ export async function loadParts(parts: UserPart[], model: ChatModel): Promise<Lo
   }
   return out;
 }
+
+/** The images and PDFs tools returned, as parts this model takes (a note for each one it does not take). */
+export function toolMediaParts(results: ToolResult[], model: ChatModel): LoadedPart[] {
+  const out: LoadedPart[] = [];
+  for (const r of results) {
+    for (const m of r.media ?? []) {
+      if (m.type === 'image' ? model.image : model.pdf) out.push(m);
+      else out.push({ type: 'text', text: `[${m.name} from ${r.name} left out: this model does not accept ${m.type === 'image' ? 'images' : 'PDF files'}]` });
+    }
+  }
+  return out;
+}
+
+/** Text put before the media of tool results in formats that send them as a user message. */
+export const TOOL_MEDIA_INTRO = '[Files returned by the tool calls above]';
 
 export const SUMMARY_PREFIX = '[Summary of the earlier conversation]\n';
 

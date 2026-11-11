@@ -113,6 +113,12 @@ export interface CodexDetection {
  * thread/compact/start; 0.96.0 has all of them.
  */
 export const MIN_CODEX_VERSION = '0.96.0';
+/**
+ * thread/resume `excludeTurns` (skip sending the whole history back) is experimental before 0.151.0: those builds
+ * refuse it ("requires experimentalApi capability") and Harness Team does not opt into experimental APIs. Checked in
+ * the published protocol sources (`#[experimental("thread/resume.excludeTurns")]` through rust-v0.150.1).
+ */
+const EXCLUDE_TURNS_SINCE = '0.151.0';
 
 /** Finds the official Codex CLI binary without touching its credentials (`login status` is Codex's own check). */
 export async function detectCodex(env: NodeJS.ProcessEnv = process.env): Promise<CodexDetection> {
@@ -238,8 +244,11 @@ class CodexConnection {
   onGlobal: ((method: string, params: any) => void) | null = null;
   alive = true;
   exitReason: string | null = null;
+  /** Whether thread/resume may send `excludeTurns` (EXCLUDE_TURNS_SINCE). */
+  readonly excludeTurns: boolean;
 
   constructor(opts: CodexAdapterOptions) {
+    this.excludeTurns = !olderThan(opts.version, EXCLUDE_TURNS_SINCE);
     const rpc: JsonRpcProcess = new JsonRpcProcess(
       opts.command,
       [...(opts.argsPrefix ?? []), ...(opts.args ?? ['app-server'])],
@@ -697,13 +706,16 @@ export class CodexAdapter implements RuntimeAdapter {
     try {
       const conn = await this.connection();
       const models: RuntimeModelOption[] = [];
+      // Every model this Codex build knows, hidden ones included (a configured hidden model still runs).
+      const known = new Set<string>();
       let cursor: string | null = null;
       for (let page = 0; page < 20; page++) {
-        const res: any = await conn.rpc.request('model/list', { includeHidden: false, ...(cursor ? { cursor } : {}) }, 20_000);
+        const res: any = await conn.rpc.request('model/list', { includeHidden: true, ...(cursor ? { cursor } : {}) }, 20_000);
         for (const m of Array.isArray(res?.data) ? res.data : []) {
-          if (!m || m.hidden) continue;
-          const id = String(m.model ?? m.id ?? '');
+          const id = String(m?.model ?? m?.id ?? '');
           if (!id) continue;
+          known.add(id);
+          if (m.hidden) continue;
           models.push({
             id,
             displayName: String(m.displayName ?? id),
@@ -723,17 +735,28 @@ export class CodexAdapter implements RuntimeAdapter {
       let cfgModel: string | null = null;
       let cfgEffort: string | null = null;
       let note: Localized | null = null;
+      let unknownModel = false;
       try {
         const cfg: any = await conn.rpc.request('config/read', cwd ? { cwd } : {}, 15_000);
         cfgModel = typeof cfg?.config?.model === 'string' ? cfg.config.model : null;
         cfgEffort = typeof cfg?.config?.model_reasoning_effort === 'string' ? cfg.config.model_reasoning_effort : null;
+        // A model this Codex build does not know (config.toml written by a newer Codex, e.g. the desktop app) fails on
+        // the first request; the default is then the one this build marks. Other providers' models are not in model/list.
+        const provider = cfg?.config?.model_provider;
+        if (cfgModel && !known.has(cfgModel) && (provider == null || provider === 'openai')) {
+          note = L('你的 Codex 配置的模型 {model} 不是这个版本的 Codex（{version}）提供的模型', 'The model {model} in your Codex configuration is not offered by this Codex version ({version})', {
+            model: cfgModel,
+            version: this.opts.version ?? 'codex',
+          });
+          cfgModel = null;
+          unknownModel = true;
+        }
       } catch (e) {
         note = L('config/read 失败（{error}），默认模型按 model/list 的 isDefault 推断', 'config/read failed ({error}); the default model is inferred from isDefault in model/list', { error: (e as Error).message });
       }
       const permissionModes = await codexModeAvailability(conn);
       const defModel = cfgModel ?? models.find((m) => m.isDefault)?.id ?? null;
       const entry = models.find((m) => m.id === defModel);
-      if (defModel && !entry) note = L('你的 Codex 配置的默认模型 {model} 不在 model/list 可见列表中', 'The default model {model} in your Codex configuration is not in the model/list results', { model: defModel });
       return {
         ...base,
         available: true,
@@ -741,7 +764,8 @@ export class CodexAdapter implements RuntimeAdapter {
         models,
         nativeDefault: {
           model: defModel,
-          effort: cfgEffort ?? entry?.defaultEffort ?? null,
+          // Replacing an unknown model, it is sent explicitly, so the effort must be one that model takes.
+          effort: unknownModel && entry ? codexImplicitEffort(entry, cfgEffort) : (cfgEffort ?? entry?.defaultEffort ?? null),
           efforts: entry?.efforts ?? [],
           note: note ?? (cfgModel ? L('来自你的 Codex 配置（config.toml）', 'From your Codex configuration (config.toml)') : L('来自 Codex model/list 标记的默认模型', 'The default model marked by Codex model/list')),
         },
@@ -942,7 +966,7 @@ async function openThread(
   };
   if (resumeId) {
     try {
-      res = await conn.rpc.request('thread/resume', { threadId: resumeId, cwd, approvalsReviewer: reviewer, excludeTurns: true, ...extra });
+      res = await conn.rpc.request('thread/resume', { threadId: resumeId, cwd, approvalsReviewer: reviewer, ...(conn.excludeTurns ? { excludeTurns: true } : {}), ...extra });
     } catch (e) {
       if (!conn.alive) throw e;
       const msg = (e as Error).message;
@@ -1822,6 +1846,21 @@ function codexChange(kind: unknown): FileChange['change'] {
   return k === 'add' || k === 'delete' ? k : 'update';
 }
 
+/**
+ * Codex reports an added or deleted file with its whole content as `diff` (only updates carry a unified diff); as
+ * +/- lines it reads like the other diffs and its lines are counted.
+ */
+function codexDiff(change: FileChange['change'], diff: unknown): string {
+  if (typeof diff !== 'string' || !diff) return '';
+  if (change !== 'add' && change !== 'delete') return diff;
+  const mark = change === 'add' ? '+' : '-';
+  return diff
+    .replace(/\r?\n$/, '')
+    .split(/\r?\n/)
+    .map((l) => mark + l)
+    .join('\n');
+}
+
 function mapItem(item: any, liveOutput?: string): MappedItem | null {
   const failedStatus = ['failed', 'declined'].includes(item.status);
   switch (item.type) {
@@ -1856,7 +1895,10 @@ function mapItem(item: any, liveOutput?: string): MappedItem | null {
         failed: failedStatus,
         files: changes
           .filter((c) => typeof c?.path === 'string')
-          .map((c) => ({ path: c.path, change: codexChange(c.kind), diff: typeof c.diff === 'string' ? c.diff : '' })),
+          .map((c) => {
+            const change = codexChange(c.kind);
+            return { path: c.path, change, diff: codexDiff(change, c.diff) };
+          }),
       };
     }
     case 'mcpToolCall':

@@ -265,10 +265,10 @@ function main() {
       if (/^https?:\/\//i.test(url) && !url.startsWith(origin + '/')) void shell.openExternal(url);
       return { action: 'deny' };
     });
+    // The UI is one page: a link in a message that points back at the server (`/api/…`) must not replace it either.
     win.webContents.on('will-navigate', (e, url) => {
-      if (url.startsWith(origin + '/')) return;
       e.preventDefault();
-      if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+      if (/^https?:\/\//i.test(url) && !url.startsWith(origin + '/')) void shell.openExternal(url);
     });
     // Ctrl+, opens Settings on Windows / Linux, where the menu item cannot show that shortcut (menu.cjs).
     if (process.platform !== 'darwin') {

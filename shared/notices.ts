@@ -50,6 +50,7 @@ const T = {
     zh: 'Antigravity 受限模式：#{seq} 未自动投递给 {who}。受限模式下只有用户 @ 能唤醒 Antigravity，它的发言也不会自动唤醒其他成员。',
     en: 'Antigravity restricted mode: #{seq} was not delivered to {who} automatically. In restricted mode only you can wake Antigravity with an @mention, and what it says does not wake other members.',
   },
+  // No longer sent (chat members wake any member like other agents do); kept so notices already in chats still render.
   'delivery.chatGate': {
     zh: '#{seq} 未自动投递给 {who}：聊天成员只能唤醒你在本群 @ 过的编程成员。需要时请由你 @ 对方一次。',
     en: '#{seq} was not delivered to {who}: chat members can only wake coding members you have @mentioned in this chat. @mention them once yourself if needed.',
@@ -105,6 +106,9 @@ const T = {
   'perm.kimi.auto': { zh: '自动批准安全操作（auto）', en: 'Auto-approve safe actions (auto)' },
   'perm.yolo': { zh: '全部自动批准（yolo）', en: 'Approve everything (yolo)' },
   'perm.skip-permissions': { zh: '跳过所有审批（--dangerously-skip-permissions）', en: 'Skip all approvals (--dangerously-skip-permissions)' },
+  'perm.chat.manual': { zh: '写文件和命令都确认（manual）', en: 'Ask before writes and commands (manual)' },
+  'perm.chat.acceptEdits': { zh: '自动接受编辑，命令确认（acceptEdits）', en: 'Accept edits, ask for commands (acceptEdits)' },
+  'perm.chat.full-access': { zh: '完全访问，不审批（full-access）', en: 'Full access, no approvals (full-access)' },
   'agent.applyAfterTurn': {
     zh: '当前回合不受影响（不会中断回合或工具），将从本回合结束后的下一回合起生效',
     en: 'The current turn is not affected (no turn or tool is interrupted); they apply from the turn after it',
@@ -115,6 +119,8 @@ const T = {
     en: '@{handle} was removed from the chat. If added again, it continues its original native session.',
   },
   'agent.deleted': { zh: '成员 {name}（@{handle}）已删除。', en: 'Member {name} (@{handle}) was deleted.' },
+  'command.memberNotice': { zh: '@{handle}：{text}', en: '@{handle}: {text}' },
+  'command.allSkipped': { zh: '/compact 没有发给 {who}：{runtimes} 没有 /compact。', en: '/compact was not sent to {who}: /compact is not available in {runtimes}.' },
 
   // ---- tasks ----
   'task.created': { zh: '{actor} 创建了任务 #{id}「{title}」{assignee}', en: '{actor} created task #{id} “{title}”{assignee}' },
@@ -317,7 +323,8 @@ export function isNoticeCode(code: unknown): code is NoticeCode {
 
 /** The label of a member's permission mode (null = follow the user's settings), in the runtime's own terms. */
 export function permissionLabel(runtimeKind: string, mode: string | null): NoticeText {
-  if (!mode) return { code: 'perm.follow' };
+  // A chat member has no settings of its own to follow: nothing chosen is read-only.
+  if (!mode) return { code: runtimeKind === 'chat' ? 'perm.read-only' : 'perm.follow' };
   const own = `perm.${runtimeKind}.${mode}`;
   return { code: isNoticeCode(own) ? own : (`perm.${mode}` as NoticeCode) };
 }

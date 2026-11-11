@@ -261,23 +261,27 @@ function PermissionField(props: {
   const label = (m: PermissionMode) => noticeText(permissionLabel(props.runtimeKind, m), m);
   const off = unavailableModes(catalog);
   const offTip = [...off].map(([m, why]) => `${label(m)}: ${lz(why)}`).join('\n');
+  // A chat member has no settings of its own to follow: nothing chosen is read-only.
+  const chat = props.runtimeKind === 'chat';
+  const value = chat ? props.value || 'read-only' : props.value;
   // A saved mode this build does not offer (cannot normally happen) stays visible instead of silently changing.
-  const unknown = props.value && !modes.includes(props.value as PermissionMode);
-  const help = props.value
-    ? ((props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' || props.runtimeKind === 'kimi' ? `permHelp.${props.runtimeKind}.${props.value}` : `permHelp.${props.value}`) as Parameters<TFunc>[0])
+  const unknown = value && !modes.includes(value as PermissionMode);
+  const help = value
+    ? ((chat || props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' || props.runtimeKind === 'kimi' ? `permHelp.${props.runtimeKind}.${value}` : `permHelp.${value}`) as Parameters<TFunc>[0])
     : 'permHelp.follow';
+  const general = chat ? t('perm.chatHelp') : t('perm.help', { runtime });
   return (
     <div className="field">
       <label className="field-label" htmlFor={`perm-${props.runtimeKind}`}>
         {t('perm.label')}{' '}
-        <HelpTip text={`${unknown ? t('perm.help', { runtime }) : `${t(help, { runtime })} ${t('perm.help', { runtime })}`}${offTip ? `\n\n${offTip}` : ''}`} />
+        <HelpTip text={`${unknown ? general : `${t(help, { runtime })} ${general}`}${offTip ? `\n\n${offTip}` : ''}`} />
       </label>
       <select
         id={`perm-${props.runtimeKind}`}
-        value={props.value}
+        value={value}
         onChange={(e) => (isRiskyMode(e.target.value) ? setAsking(e.target.value) : props.onChange(e.target.value))}
       >
-        <option value="">{noticeText(N('perm.follow'), '')}</option>
+        {!chat && <option value="">{noticeText(N('perm.follow'), '')}</option>}
         {modes.map((m) => (
           <option key={m} value={m} disabled={off.has(m) && props.value !== m} title={off.has(m) ? lz(off.get(m)!) : undefined}>
             {label(m)}
@@ -769,16 +773,19 @@ export function MembersPanel(props: {
   const modeActions = (a: AgentWithStatus): MenuItem[] => {
     const modes = PERMISSION_MODES[a.runtimeKind] ?? [];
     const off = unavailableModes(catalogCache.get(catalogKey(a.runtimeKind, a.workspace)));
+    // A chat member has no settings of its own to follow: nothing chosen is read-only.
+    const chat = a.runtimeKind === 'chat';
+    const current = chat ? (a.permissionMode ?? 'read-only') : a.permissionMode;
     const pick = (m: PermissionMode | null) => () => {
-      if (m === a.permissionMode) return;
+      if (m === current) return;
       if (m && isRiskyMode(m)) setRiskAsk({ agent: a, mode: m });
       else void setMode(a, m);
     };
     return [
-      { label: panelNoticeText(N('perm.follow'), ''), checked: !a.permissionMode, onSelect: pick(null) },
+      ...(chat ? [] : [{ label: panelNoticeText(N('perm.follow'), ''), checked: !a.permissionMode, onSelect: pick(null) }]),
       ...modes.map((m) => ({
         label: panelNoticeText(permissionLabel(a.runtimeKind, m), m),
-        checked: a.permissionMode === m,
+        checked: current === m,
         danger: isRiskyMode(m),
         disabled: off.has(m) && a.permissionMode !== m,
         title: off.has(m) ? lz(off.get(m)!) : undefined,
@@ -1332,64 +1339,43 @@ function NewAgentForm(props: {
           {detecting ? <span className="spinner" aria-hidden="true" /> : <Icon name="refresh" size={14} />}
         </button>
       </div>
-      <div className="choice-grid" role="radiogroup" aria-label={t('add.type')}>
-        {offered.flatMap((r) =>
-          r.kind === 'chat' && r.available && chatProviders.length > 0
-            ? [
-                <label key="chat" className={`choice${isChat ? ' on' : ''}`}>
-                  <input
-                    type="radio"
-                    name="runtime"
-                    checked={isChat}
-                    {...runtimeRadioHandlers(
-                      () => (userPicked.current = true),
-                      () => {
-                        setRuntimeKind('chat');
-                        resetConfig();
-                      },
-                    )}
-                  />
-                  <AgentAvatar agent={{ runtimeKind: 'chat', displayName: t('cp.providers'), avatar: null }} />
-                  <span className="choice-main">
-                    <span className="choice-title">{t('cp.providers')}</span>
-                    <span className="choice-sub">{t('cp.providerCount', { n: chatProviders.length })}</span>
-                  </span>
-                </label>,
-              ]
-            : [
-                <label key={r.kind} className={`choice${runtimeKind === r.kind ? ' on' : ''}${runtimeUsable(r) ? '' : ' disabled'}`} title={(r.kind === 'chat' && r.available ? t('add.chatNoProviderTip') : lz(r.problem ?? r.note)) || undefined}>
-                  <input
-                    type="radio"
-                    name="runtime"
-                    checked={runtimeKind === r.kind}
-                    disabled={!runtimeUsable(r)}
-                    {...runtimeRadioHandlers(
-                      () => (userPicked.current = true),
-                      () => {
-                        setRuntimeKind(r.kind);
-                        resetConfig();
-                      },
-                    )}
-                  />
-                  <AgentAvatar agent={{ runtimeKind: r.kind, displayName: RUNTIME_NAME[r.kind], avatar: null }} />
-                  <span className="choice-main">
-                    <span className="choice-title">{RUNTIME_NAME[r.kind]}</span>
-                    <span className="choice-sub">
-                      {r.kind === 'chat' && r.available
-                        ? t('add.chatNoProvider')
-                        : r.available
-                          ? (r.version ?? '')
-                          : runtimeUsable(r)
-                            ? t('add.subscriptionMissing')
-                            : lz(r.problem ?? r.note) || t('add.notAvailable')}
-                    </span>
-                  </span>
-                </label>,
-              ],
-        )}
+      <div role="radiogroup" aria-label={t('add.type')} className="runtime-choices">
+        {available.length > 0 && <div className="choice-grid">{available.map(runtimeChoice)}</div>}
+        {/* Not usable yet: one compact line each, with what is missing. */}
+        {available.length < offered.length && <div className="choice-grid compact">{offered.filter((r) => !runtimeUsable(r)).map(runtimeChoice)}</div>}
       </div>
     </div>
   );
+
+  function runtimeChoice(r: RuntimeDescriptor) {
+    const markPicked = () => (userPicked.current = true);
+    const pickThis = () => {
+      setRuntimeKind(r.kind);
+      resetConfig();
+    };
+    if (r.kind === 'chat' && r.available && chatProviders.length > 0)
+      return (
+        <label key="chat" className={`choice${isChat ? ' on' : ''}`}>
+          <input type="radio" name="runtime" checked={isChat} {...runtimeRadioHandlers(markPicked, pickThis)} />
+          <AgentAvatar agent={{ runtimeKind: 'chat', displayName: t('cp.providers'), avatar: null }} />
+          <span className="choice-main">
+            <span className="choice-title">{t('cp.providers')}</span>
+            <span className="choice-sub">{t('cp.providerCount', { n: chatProviders.length })}</span>
+          </span>
+        </label>
+      );
+    const usable = runtimeUsable(r);
+    return (
+      <label key={r.kind} className={`choice${runtimeKind === r.kind ? ' on' : ''}${usable ? '' : ' disabled'}`} title={(r.kind === 'chat' && r.available ? t('add.chatNoProviderTip') : lz(r.problem ?? r.note)) || undefined}>
+        <input type="radio" name="runtime" checked={runtimeKind === r.kind} disabled={!usable} {...runtimeRadioHandlers(markPicked, pickThis)} />
+        {usable && <AgentAvatar agent={{ runtimeKind: r.kind, displayName: RUNTIME_NAME[r.kind], avatar: null }} />}
+        <span className="choice-main">
+          <span className="choice-title">{RUNTIME_NAME[r.kind]}</span>
+          <span className="choice-sub">{r.kind === 'chat' && r.available ? t('add.chatNoProvider') : r.available ? (r.version ?? '') : lz(r.problem ?? r.note) || t('add.notAvailable')}</span>
+        </span>
+      </label>
+    );
+  }
 
   // Nothing can run yet: only the harnesses, each with what is missing.
   if (available.length === 0) return <div className="form">{typeField}</div>;
@@ -1439,79 +1425,90 @@ function NewAgentForm(props: {
       }}
     >
       {typeField}
-      <div className="field">
-        <label className="field-label" htmlFor="agent-name">
-          {t('add.name')}
-        </label>
-        <input
-          id="agent-name"
-          value={displayName}
-          maxLength={60}
-          autoFocus
-          onFocus={(e) => e.currentTarget.select()}
-          onChange={(e) => setTypedName(e.target.value)}
-        />
-        {sameName && <div className="hint warn-text">{t('add.sameName', { name: sameName.name })}</div>}
-      </div>
-      <div className="field">
-        <label className="field-label" htmlFor="agent-handle">
-          {t('add.handle')}
-        </label>
-        <div className="input-prefix">
-          <span>@</span>
+      <div className="field-row">
+        <div className="field">
+          <label className="field-label" htmlFor="agent-name">
+            {t('add.name')}
+          </label>
           <input
-            id="agent-handle"
-            ref={handleRef}
-            value={handle}
-            maxLength={40}
-            placeholder={suggested}
-            onChange={(e) => {
-              setHandle(e.target.value);
-              setError(null);
-            }}
+            id="agent-name"
+            value={displayName}
+            maxLength={60}
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onChange={(e) => setTypedName(e.target.value)}
           />
+          {sameName && <div className="hint warn-text">{t('add.sameName', { name: sameName.name })}</div>}
         </div>
-        {handleErr && <div className="hint warn-text">{handleErr}</div>}
-      </div>
-      <LanguageField id="agent-lang" value={language} roomLanguage={props.room.agentLanguage} onChange={setLanguage} />
-      {needsWorkspace && <WorkspacePicker value={workspace} onChange={setWorkspace} />}
-      {needsWorkspace && (
-        <label className="check">
-          <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
-          <span>{t('add.worktree')}</span>
-          <HelpTip text={t('add.worktreeHelp')} />
-        </label>
-      )}
-      {isChat ? (
-        <>
-          <ChatModelPicker providerId={chatCfg.providerId} model={chatCfg.model} effort={chatCfg.effort} onChange={setChatCfg} />
-          <ChatSettingsFields value={chatSettings} model={chatModel} onChange={setChatSettings} />
-        </>
-      ) : !runtime?.isMock && (
-        <>
-          <ModelEffortFields runtimeKind={runtimeKind} generation={detected} model={cfg.model} effort={cfg.effort} onChange={setCfg} onMetered={setModelMetered} />
-          <PermissionField
-            runtimeKind={runtimeKind}
-            generation={detected}
-            handle={handle.trim() || displayName.trim()}
-            value={(PERMISSION_MODES[runtimeKind] ?? []).includes(perm as PermissionMode) ? perm : ''}
-            onChange={setPerm}
-          />
-          {runtimeKind === 'antigravity' && (
-            <CollabModeSelect
-              value={collab}
-              busy={false}
-              asking={askingCollab}
-              onAsk={setAskingCollab}
-              onRestricted={() => setCollab('restricted')}
-              onEnable={() => {
-                setCollab('full');
-                setAskingCollab(false);
+        <div className="field">
+          <label className="field-label" htmlFor="agent-handle">
+            {t('add.handle')}
+          </label>
+          <div className="input-prefix">
+            <span>@</span>
+            <input
+              id="agent-handle"
+              ref={handleRef}
+              value={handle}
+              maxLength={40}
+              placeholder={suggested}
+              onChange={(e) => {
+                setHandle(e.target.value);
+                setError(null);
               }}
             />
-          )}
-        </>
+          </div>
+          {handleErr && <div className="hint warn-text">{handleErr}</div>}
+        </div>
+      </div>
+      {isChat ? (
+        <ChatModelPicker providerId={chatCfg.providerId} model={chatCfg.model} effort={chatCfg.effort} onChange={setChatCfg} />
+      ) : (
+        !runtime?.isMock && <ModelEffortFields runtimeKind={runtimeKind} generation={detected} model={cfg.model} effort={cfg.effort} onChange={setCfg} onMetered={setModelMetered} />
       )}
+      {needsWorkspace && <WorkspacePicker value={workspace} onChange={setWorkspace} />}
+      <details className="form-more">
+        <summary>{t('add.more')}</summary>
+        <LanguageField id="agent-lang" value={language} roomLanguage={props.room.agentLanguage} onChange={setLanguage} />
+        {needsWorkspace && (
+          <label className="check">
+            <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
+            <span>{t('add.worktree')}</span>
+            <HelpTip text={t('add.worktreeHelp')} />
+          </label>
+        )}
+        {isChat ? (
+          <>
+            <ChatSettingsFields value={chatSettings} model={chatModel} onChange={setChatSettings} />
+            <PermissionField runtimeKind="chat" handle={handle.trim() || displayName.trim()} value={(PERMISSION_MODES.chat as readonly string[]).includes(perm) ? perm : ''} onChange={setPerm} />
+          </>
+        ) : (
+          !runtime?.isMock && (
+            <>
+              <PermissionField
+                runtimeKind={runtimeKind}
+                generation={detected}
+                handle={handle.trim() || displayName.trim()}
+                value={(PERMISSION_MODES[runtimeKind] ?? []).includes(perm as PermissionMode) ? perm : ''}
+                onChange={setPerm}
+              />
+              {runtimeKind === 'antigravity' && (
+                <CollabModeSelect
+                  value={collab}
+                  busy={false}
+                  asking={askingCollab}
+                  onAsk={setAskingCollab}
+                  onRestricted={() => setCollab('restricted')}
+                  onEnable={() => {
+                    setCollab('full');
+                    setAskingCollab(false);
+                  }}
+                />
+              )}
+            </>
+          )
+        )}
+      </details>
       {ownMetered && (
         <div className="banner">
           {isChat ? t('add.meteredChat') : runtimeKind === 'opencode' ? t('add.meteredOpenCode') : t('add.meteredOwn', { runtime: runtime!.label })}
@@ -1752,6 +1749,7 @@ function AgentDialog(props: {
               onChange={(v) => setCfg({ model: v.model, effort: v.effort })}
             />
             <ChatSettingsFields value={chatSettings} model={chatModel} onChange={setChatSettings} />
+            <PermissionField runtimeKind="chat" handle={a.handle} value={perm} onChange={setPerm} />
           </>
         ) : !a.isMock && (
           <>

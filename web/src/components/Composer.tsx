@@ -4,6 +4,7 @@ import { api, newClientMessageId } from '../api.ts';
 import { clearSentDraft, historyStep, loadDraft, matchCommands, menuKey, onFirstLine, onLastLine, type Quote, saveDraft, withQuotes } from '../composer-logic.ts';
 import type { AttachmentDrafts } from '../attachments.ts';
 import { DraftStrip } from './Attachments.tsx';
+import { Dialog } from './Dialog.tsx';
 import { useLocalized, useT } from '../i18n.tsx';
 import { Icon } from './Icon.tsx';
 import { configSummary } from './MembersPanel.tsx';
@@ -101,6 +102,8 @@ export function Composer(props: {
   textNow.current = text;
   const [quotes, setQuotes] = useState<Quote[]>(() => roomQuotes.get(props.roomId) ?? []);
   const [openQuote, setOpenQuote] = useState<string | null>(null);
+  /** "@all /compact" waiting for the user to accept the billed requests of these chat members. */
+  const [billed, setBilled] = useState<AgentWithStatus[] | null>(null);
   const quotesNow = useRef(quotes);
   quotesNow.current = quotes;
   useEffect(() => {
@@ -184,6 +187,9 @@ export function Composer(props: {
   const fallback = props.members.find((a) => a.id === props.defaultMemberId);
   const cmd = mention || listOff ? null : (commandQuery(text, caret) ?? (fallback ? implicitCommandQuery(text, caret, fallback.handle) : null));
   const cmdAgent = cmd ? memberByHandle(cmd.handle) : undefined;
+  // "@all /…" offers only /compact, run by every member whose runtime has it.
+  const allCmd = !!cmd && !cmdAgent && handleKey(cmd.handle) === ALL_HANDLE && props.members.length > 0;
+  const compactBy = props.members.filter((a) => commandsOf(a).some((c) => c.name === 'compact' && c.action === 'native'));
 
   // The member's skills are listed by its own runtime (on demand, when "@member /" is typed).
   useEffect(() => {
@@ -195,12 +201,15 @@ export function Composer(props: {
   // Built-in commands first (from the runtime description until the member's own list arrives), then its skills.
   const builtins = cmd && cmdAgent ? matchCommands(listed?.data?.commands ?? commandsOf(cmdAgent), cmd.query) : [];
   const skills = cmd && cmdAgent ? matchCommands(listed?.data?.skills ?? [], cmd.query) : [];
-  const commands = [...builtins, ...skills];
+  const allCommands: RuntimeCommand[] = compactBy.length
+    ? [{ name: 'compact', description: t('composer.compactAll', { who: compactBy.map((a) => '@' + a.handle).join(t('common.listSep')) }), action: 'native' }]
+    : [];
+  const commands = allCmd ? matchCommands(allCommands, cmd!.query) : [...builtins, ...skills];
   // Only the composer's own text decides: a bare "/name" gets a hint instead of being sent as chat.
   const bare = !fallback && !mention && !cmd && BARE_COMMAND.test(text.slice(0, caret)) && !text.slice(0, caret).includes('\n');
   const listLength = suggestions.length || commands.length;
   // A list is shown (the command list also when nothing matches); Esc closes it.
-  const menuOpen = suggestions.length > 0 || !!(cmd && cmdAgent);
+  const menuOpen = suggestions.length > 0 || !!(cmd && (cmdAgent || allCmd));
   const active = listLength > 0 ? Math.min(highlight, listLength - 1) : -1;
 
   // Keep the highlighted row in view in a long (scrolling) list.
@@ -226,7 +235,13 @@ export function Composer(props: {
     pendingCaret.current = pos;
   };
   const pickCommand = (c: RuntimeCommand) => {
-    if (!cmd || !cmdAgent) return;
+    if (!cmd) return;
+    if (allCmd) {
+      const insert = `/${c.name}`;
+      moveCaret(text.slice(0, cmd.start) + insert + text.slice(caret), cmd.start + insert.length);
+      return;
+    }
+    if (!cmdAgent) return;
     if (c.action === 'settings') {
       // Changed in the member settings: the "/…" goes away, the mention stays. The focus goes to the settings dialog.
       setText(text.slice(0, cmd.start) + text.slice(caret));
@@ -248,7 +263,7 @@ export function Composer(props: {
   const hasAttachments = atts.drafts.length > 0;
   const quoted = quotes.filter((q) => q.text.trim() || q.note.trim());
   const canSend = !sending && !props.offline && atts.ready && (!!text.trim() || hasAttachments || quoted.length > 0);
-  const send = async () => {
+  const send = async (confirmed = false) => {
     const typed = text.trim();
     if (!canSend) return;
     const sentQuotes = quotes;
@@ -267,6 +282,14 @@ export function Composer(props: {
       setCaret(0);
       props.onOpenMember?.(target.id);
       return;
+    }
+    if (!confirmed && slash && !hasAttachments && handleKey(slash.handle) === ALL_HANDLE && slash.name === 'compact' && !slash.args.trim()) {
+      // Chat members summarize through their provider's API: each one is a billed request.
+      const paid = compactBy.filter((a) => a.runtimeKind === 'chat');
+      if (paid.length) {
+        setBilled(paid);
+        return;
+      }
     }
     const roomId = props.roomId;
     setSending(true);
@@ -436,6 +459,47 @@ export function Composer(props: {
             )}
           </div>
         </div>
+      )}
+      {cmd && allCmd && (
+        <div ref={listRef} className="mention-list command-list">
+          <div className="list-head">
+            <span aria-hidden="true">{t('composer.commands', { handle: ALL_HANDLE })}</span>
+          </div>
+          <ul id={listId} role="listbox" aria-label={t('composer.commands', { handle: ALL_HANDLE })}>
+            {commands.map((c, i) => commandRow(c, i))}
+          </ul>
+          <div aria-live="polite">
+            {!commands.length && (
+              <div className="list-status muted">{t(compactBy.length ? 'composer.allOnlyCompact' : 'composer.noCompact')}</div>
+            )}
+          </div>
+        </div>
+      )}
+      {billed && (
+        <Dialog
+          alert
+          title={t('composer.compactAllTitle')}
+          onClose={() => setBilled(null)}
+          actions={
+            <>
+              <button type="button" onClick={() => setBilled(null)} autoFocus>
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => {
+                  setBilled(null);
+                  void send(true);
+                }}
+              >
+                {t('composer.compactAllConfirm')}
+              </button>
+            </>
+          }
+        >
+          <p>{t('composer.compactAllBilled', { n: billed.length, who: billed.map((a) => '@' + a.handle).join(t('common.listSep')) })}</p>
+        </Dialog>
       )}
       {bare && (
         <ul className="mention-list command-list" aria-live="polite">

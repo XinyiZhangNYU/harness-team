@@ -10,6 +10,8 @@ import {
   finishHeaders,
   parseJson,
   loadParts,
+  type LoadedPart,
+  toolMediaParts,
   rawFits,
   type StopKind,
   SUMMARY_PREFIX,
@@ -73,6 +75,9 @@ export function geminiSchema(s: unknown): Json {
   return out;
 }
 
+const partOf = (p: LoadedPart): Part =>
+  p.type === 'text' ? { text: p.text } : { inlineData: { mimeType: p.type === 'image' ? p.mime : 'application/pdf', data: p.data } };
+
 async function contents(spec: CallSpec): Promise<Content[]> {
   const list: Content[] = [];
   const push = (role: Content['role'], parts: Part[]) => {
@@ -85,12 +90,7 @@ async function contents(spec: CallSpec): Promise<Content[]> {
     if (it.role === 'summary') push('user', [{ text: SUMMARY_PREFIX + it.text }]);
     else if (it.role === 'user') {
       const parts = await loadParts(it.parts, spec.model);
-      push(
-        'user',
-        parts.map((p): Part =>
-          p.type === 'text' ? { text: p.text } : { inlineData: { mimeType: p.type === 'image' ? p.mime : 'application/pdf', data: p.data } },
-        ),
-      );
+      push('user', parts.map(partOf));
     } else if (it.role === 'assistant') {
       if (rawFits(it.raw, spec) && Array.isArray(it.raw!.data)) {
         push('model', it.raw!.data as Part[]);
@@ -105,6 +105,8 @@ async function contents(spec: CallSpec): Promise<Content[]> {
         'user',
         it.results.map((r): Part => ({ functionResponse: { name: r.name, response: r.isError ? { error: r.content } : { result: r.content } } })),
       );
+      // Images and PDFs a tool returned follow the function responses in the same turn.
+      push('user', toolMediaParts(it.results, spec.model).map(partOf));
     }
   }
   if (list[0]?.role !== 'user') list.unshift({ role: 'user', parts: [{ text: '…' }] });

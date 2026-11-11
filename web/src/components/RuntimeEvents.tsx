@@ -39,6 +39,7 @@ function statusText(t: TFunc, s: Message['status']): string {
 function nativeStatusText(t: TFunc, s: string): string | undefined {
   if (s === 'declined' || s === 'denied' || s === 'rejected') return t('activity.declined');
   if (s === 'cancelled' || s === 'canceled') return t('activity.cancelled');
+  if (s === 'sessionApproved') return t('activity.sessionApproved');
   return undefined;
 }
 
@@ -82,7 +83,26 @@ export function ActivityItem({ message, sender, showAvatar }: { message: Message
   );
 }
 
-const decisionLabel = (t: TFunc, d: ApprovalDecision) => t(`approval.${d}`);
+type ApprovalMeta = Extract<NonNullable<Message['meta']>, { type: 'approval' }>;
+/** Chat members ask for a command, a file or a website, and "for this session" covers exactly that one. */
+const chatTarget = (meta: ApprovalMeta | null) =>
+  meta?.runtime !== 'chat' ? null : meta.nativeMethod === 'chat/run_command' ? 'command' : meta.nativeMethod === 'chat/fetch_url' ? 'site' : 'file';
+const SESSION_LABEL = { command: 'approval.allow_session_command', file: 'approval.allow_session_file', site: 'approval.allow_session_site' } as const;
+const SESSION_HELP = { command: 'approval.help_allow_session_command', file: 'approval.help_allow_session_file', site: 'approval.help_allow_session_site' } as const;
+
+function decisionLabel(t: TFunc, d: ApprovalDecision, meta: ApprovalMeta | null): string {
+  if (d === 'allow_prefix') return t('approval.allow_prefix', { prefix: meta?.prefix ?? '' });
+  if (d === 'allow_session' && meta?.scope) return t('approval.allow_session_scope', { scope: meta.scope });
+  const target = chatTarget(meta);
+  if (d === 'allow_session' && target) return t(SESSION_LABEL[target]);
+  return t(`approval.${d}`);
+}
+
+function decisionHelp(t: TFunc, d: ApprovalDecision, meta: ApprovalMeta | null): string {
+  const target = chatTarget(meta);
+  if (d === 'allow_session' && target) return t(SESSION_HELP[target]);
+  return t(`approval.help_${d}`);
+}
 
 export function ApprovalCard({ message, sender, showAvatar }: { message: Message; sender?: AgentWithStatus; showAvatar?: boolean }) {
   const t = useT();
@@ -108,13 +128,13 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
   if (meta && state === 'resolved') {
     outcome =
       meta.decidedBy === 'user'
-        ? t('approval.chose', { decision: decisionLabel(t, meta.userDecision ?? 'deny') })
+        ? t('approval.chose', { decision: decisionLabel(t, meta.userDecision ?? 'deny', meta) })
         : t('approval.closed', { runtime: RUNTIME_NAME[meta.runtime] }) + (meta.decision ? ` (${meta.decision})` : '');
   }
   const body = noticeText(meta?.label, meta?.title ?? message.body);
   // Answered or closed: one line like a tool row; the details open on click.
   if (state !== 'pending') {
-    const short = meta?.decidedBy === 'user' ? decisionLabel(t, meta.userDecision ?? 'deny') : t(`approval.${state}`);
+    const short = meta?.decidedBy === 'user' ? decisionLabel(t, meta.userDecision ?? 'deny', meta) : t(`approval.${state}`);
     return (
       <div className={`activity approval-done approval-${state}`} data-seq={message.seq} role="group" aria-label={t('approval.title')}>
         {lead(showAvatar, sender)}
@@ -151,7 +171,7 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
         <Icon name="shield" size={14} />
         <span>{t('approval.title')}</span>
         <HelpTip
-          text={[t('approval.help'), ...options.map((d) => t(`approval.help_${d}`))].join(' ')}
+          text={[t(chatTarget(meta) ? 'approval.help_chat' : 'approval.help'), ...options.map((d) => decisionHelp(t, d, meta))].join(' ')}
         />
         {sender && <span className="approval-who">@{sender.handle}</span>}
         <span className={`approval-state state-${state}`}>{t(`approval.${state}`)}</span>
@@ -179,7 +199,7 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
               disabled={busy !== null}
               onClick={() => decide(d)}
             >
-              {busy === d ? t('approval.sending') : decisionLabel(t, d)}
+              {busy === d ? t('approval.sending') : decisionLabel(t, d, meta)}
             </button>
           ))}
         </div>

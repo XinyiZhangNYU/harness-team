@@ -601,6 +601,13 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
 .segmented.tabs { align-self: flex-start; }
 
 .choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.form-more[open] { display: flex; flex-direction: column; gap: 14px; }
+.runtime-choices { display: flex; flex-direction: column; gap: 8px; }
+.choice-grid.compact { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.choice-grid.compact .choice { padding: 4px 10px; border-radius: 8px; }
+.choice-grid.compact .choice-main { flex-direction: row; align-items: baseline; gap: 8px; }
+.choice-grid.compact .choice-title { flex-wrap: nowrap; white-space: nowrap; font-weight: 500; }
+.choice-grid.compact .choice-sub { white-space: nowrap; }
 .choice-list { display: flex; flex-direction: column; gap: 6px; }
 .choice { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; cursor: pointer; transition: border-color 0.12s, background 0.12s; }
 .choice:hover { background: var(--hover); }
@@ -625,10 +632,10 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; padding: 12px 14px; border-radius: 10px; background: var(--surface-2); font-size: 13px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.sessions > summary { cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; color: var(--text-2); list-style: none; }
-.sessions > summary::-webkit-details-marker { display: none; }
-.sessions > summary::before { content: ''; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); margin: 0 4px 0 2px; transition: transform 0.12s; }
-.sessions[open] > summary::before { transform: rotate(45deg); }
+.sessions > summary, .form-more > summary { cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; color: var(--text-2); list-style: none; }
+.sessions > summary::-webkit-details-marker, .form-more > summary::-webkit-details-marker { display: none; }
+.sessions > summary::before, .form-more > summary::before { content: ''; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); margin: 0 4px 0 2px; transition: transform 0.12s; }
+.sessions[open] > summary::before, .form-more[open] > summary::before { transform: rotate(45deg); }
 .session-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
 .session-list code { font-size: 11.5px; }
 .session-list summary { cursor: pointer; }

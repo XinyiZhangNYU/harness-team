@@ -8,6 +8,8 @@ import {
   finishHeaders,
   joinUrl,
   loadParts,
+  type LoadedPart,
+  toolMediaParts,
   parseJson,
   rawFits,
   type StopKind,
@@ -40,6 +42,13 @@ const bindsThinking = (baseUrl: string) => /api\.anthropic\.com/i.test(baseUrl);
 
 const auth = (key: string | null): Record<string, string> => ({ 'anthropic-version': ANTHROPIC_VERSION, ...(key ? { 'x-api-key': key } : {}) });
 
+const partBlock = (p: LoadedPart): Block =>
+  p.type === 'text'
+    ? { type: 'text', text: p.text }
+    : p.type === 'image'
+      ? { type: 'image', source: { type: 'base64', media_type: p.mime, data: p.data } }
+      : { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: p.data } };
+
 export const anthropic: WireFormat = {
   async build(spec) {
     const messages: Msg[] = [];
@@ -53,16 +62,7 @@ export const anthropic: WireFormat = {
       if (it.role === 'summary') push('user', [{ type: 'text', text: SUMMARY_PREFIX + it.text }]);
       else if (it.role === 'user') {
         const parts = await loadParts(it.parts, spec.model);
-        push(
-          'user',
-          parts.map((p): Block =>
-            p.type === 'text'
-              ? { type: 'text', text: p.text }
-              : p.type === 'image'
-                ? { type: 'image', source: { type: 'base64', media_type: p.mime, data: p.data } }
-                : { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: p.data } },
-          ),
-        );
+        push('user', parts.map(partBlock));
       } else if (it.role === 'assistant') {
         if (rawFits(it.raw, spec) && Array.isArray(it.raw!.data)) {
           let blocks = it.raw!.data as Block[];
@@ -81,7 +81,12 @@ export const anthropic: WireFormat = {
         // Tool results go first in the user message that follows (merging keeps them first).
         push(
           'user',
-          it.results.map((r) => ({ type: 'tool_result', tool_use_id: r.callId, content: r.content || ' ', ...(r.isError ? { is_error: true } : {}) })),
+          it.results.map((r) => {
+            // Images and PDFs a tool returned go inside its result.
+            const media = toolMediaParts([r], spec.model);
+            const content: Json = media.length ? [{ type: 'text', text: r.content || ' ' }, ...media.map(partBlock)] : r.content || ' ';
+            return { type: 'tool_result', tool_use_id: r.callId, content, ...(r.isError ? { is_error: true } : {}) };
+          }),
         );
       }
     }

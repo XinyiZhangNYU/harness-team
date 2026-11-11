@@ -151,6 +151,7 @@ function chatSettings(v: unknown): ChatMemberSettings {
   return {
     projectTools: typeof o.projectTools === 'boolean' ? o.projectTools : DEFAULT_CHAT_MEMBER.projectTools,
     webSearch: typeof o.webSearch === 'boolean' ? o.webSearch : DEFAULT_CHAT_MEMBER.webSearch,
+    webFetch: typeof o.webFetch === 'boolean' ? o.webFetch : DEFAULT_CHAT_MEMBER.webFetch,
     dailyTokenLimit: int(o.dailyTokenLimit, 0, 1e12, DEFAULT_CHAT_MEMBER.dailyTokenLimit),
     maxToolRounds: int(o.maxToolRounds, 1, 200, DEFAULT_CHAT_MEMBER.maxToolRounds),
   };
@@ -1027,11 +1028,6 @@ export class Store {
   // ---- deliveries ----
 
   /** Creates a delivery unless one already exists for (message, agent); returns null for a duplicate. */
-  /** Whether the user has ever addressed this member in this room (a user delivery exists). */
-  userAddressed(roomId: string, agentId: string): boolean {
-    return !!this.db.prepare(`SELECT 1 FROM deliveries WHERE room_id = ? AND agent_id = ? AND origin = 'user' LIMIT 1`).get(roomId, agentId);
-  }
-
   createDelivery(input: NewDelivery): DeliveryInfo | null {
     const ts = now();
     const id = randomUUID();

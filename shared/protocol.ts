@@ -278,6 +278,9 @@ export type RuntimeBilling = 'subscription' | 'metered_api';
  * - Kimi Code: its ACP session mode: default (asks before edits and commands), plan (read-only planning), auto
  *   (Kimi approves what it considers safe and asks for the rest) or yolo (approves everything). Offered only when
  *   `kimi acp` reports them.
+ * - Chat members: Harness Team runs their tools itself and asks itself: read-only (the read tools at most; also when
+ *   nothing is chosen), manual (every file write and command asks), acceptEdits (file writes inside the project run,
+ *   commands ask) or full-access (nothing asks, no sandbox). Writes and commands need the chat's project folder.
  * Whether this machine allows a mode (local settings, managed requirements, what the runtime reports) is in
  * RuntimeModelCatalog.permissionModes.
  * The modes in RISKY_PERMISSION_MODES run tools without any approval and need the user's confirmation of
@@ -289,7 +292,15 @@ export type AntigravityPermissionMode = 'default' | 'accept-edits' | 'plan' | 's
 export type OpenCodePermissionMode = 'build' | 'plan';
 export type CursorPermissionMode = 'agent' | 'plan' | 'ask';
 export type KimiPermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
-export type PermissionMode = ClaudePermissionMode | CodexPermissionMode | AntigravityPermissionMode | OpenCodePermissionMode | CursorPermissionMode | KimiPermissionMode;
+export type ChatPermissionMode = 'read-only' | 'manual' | 'acceptEdits' | 'full-access';
+export type PermissionMode =
+  | ClaudePermissionMode
+  | CodexPermissionMode
+  | AntigravityPermissionMode
+  | OpenCodePermissionMode
+  | CursorPermissionMode
+  | KimiPermissionMode
+  | ChatPermissionMode;
 export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = {
   claude: ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
   codex: ['read-only', 'workspace-write', 'untrusted', 'auto-review', 'full-access'],
@@ -301,7 +312,7 @@ export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = 
   grok: [],
   kimi: ['default', 'plan', 'auto', 'yolo'],
   mock: [],
-  chat: [],
+  chat: ['read-only', 'manual', 'acceptEdits', 'full-access'],
 };
 /** Modes in which nothing asks for approval at all. Choosing one needs `acknowledgePermissionRisk`. */
 export const RISKY_PERMISSION_MODES: readonly PermissionMode[] = ['bypassPermissions', 'full-access', 'skip-permissions', 'yolo'];
@@ -517,6 +528,8 @@ export type MessageMeta =
   /**
    * A slash command the local user sent to one member (`@handle /name args`, the whole message). Run through the
    * runtime's own protocol method; never sent as chat text, never part of other members' context, never relayed.
+   * `@all /compact` is one such message delivered to every member whose runtime has `/compact`; its agentId is
+   * ALL_HANDLE.
    */
   | { type: 'command'; agentId: string; name: string; args: string; skill?: true }
   /** System notice written by the server: `notice` is the translatable form of the body. */
@@ -587,14 +600,20 @@ export type MessageMeta =
       label?: NoticeText;
       /** The runtime's own reason for asking, shown on its own line (older messages have it inside `detail`). */
       reason?: string | null;
+      /** Chat members: the command prefix that `allow_prefix` lets through for the rest of the session. */
+      prefix?: string | null;
+      /** Claude Code: the rules and folders that `allow_session` adds for the rest of the session. */
+      scope?: string | null;
     };
 
 /**
  * A human decision on a native approval request, chosen by the local user in the group chat.
- * allow = this request only; allow_session = the runtime's own session-scoped approval (Codex acceptForSession);
- * deny = refuse (the turn continues and the agent may try something else).
+ * allow = this request only; allow_session = the runtime's own session-scoped approval (Codex acceptForSession; for
+ * chat members: this exact command, or this file, for the rest of the session); allow_prefix = chat members: commands
+ * that start with the request's `prefix` for the rest of the session; allow_all_edits = chat members: every file write
+ * for the rest of the session; deny = refuse (the turn continues and the agent may try something else).
  */
-export type ApprovalDecision = 'allow' | 'allow_session' | 'deny';
+export type ApprovalDecision = 'allow' | 'allow_session' | 'allow_prefix' | 'allow_all_edits' | 'deny';
 
 /** Optional label an agent attaches via Team MCP. Informational only; it never grants anything. */
 export type MessageIntent = 'chat' | 'progress' | 'blocked' | 'help' | 'review';
@@ -923,16 +942,18 @@ export const CHAT_API_FORMATS: readonly ChatApiFormat[] = ['openai_chat', 'anthr
 
 /** Per-member settings of a chat member (stored in its config). */
 export interface ChatMemberSettings {
-  /** Read-only project tools (list_dir, read_file, search) in the room's project folder. */
+  /** Read-only project tools (list_dir, glob, read_file, search) in the room's project folder. */
   projectTools: boolean;
   /** The model's native web search, when the model has the capability. */
   webSearch: boolean;
+  /** fetch_url: GET requests Harness Team makes for the model, each approved by the user unless in full access. */
+  webFetch: boolean;
   /** Tokens (all kinds) this member may use per local day; 0 = no limit. */
   dailyTokenLimit: number;
   /** Tool rounds per turn before the turn stops. */
   maxToolRounds: number;
 }
-export const DEFAULT_CHAT_MEMBER: ChatMemberSettings = { projectTools: false, webSearch: false, dailyTokenLimit: 2_000_000, maxToolRounds: 20 };
+export const DEFAULT_CHAT_MEMBER: ChatMemberSettings = { projectTools: false, webSearch: false, webFetch: false, dailyTokenLimit: 2_000_000, maxToolRounds: 20 };
 
 /** USD per 1M tokens. */
 export interface ChatModelPrice {

@@ -1483,6 +1483,7 @@ class ClaudeTurn {
           .filter(Boolean)
           .join('\n') || null,
       options: claudeApprovalOptions(toolName, session),
+      scope: sessionScope(session),
     });
   }
 
@@ -1613,7 +1614,21 @@ export function claudeUsage(msg: any, fallbackModel: string | null): TurnUsage[]
  */
 export function claudeApprovalOptions(toolName: string, session: ClaudePermissionUpdate[] = []): ApprovalDecision[] {
   if (toolName === 'AskUserQuestion') return ['deny'];
-  return session.length && toolName !== 'ExitPlanMode' ? ['allow', 'allow_session', 'deny'] : ['allow', 'deny'];
+  return sessionScope(session) && toolName !== 'ExitPlanMode' ? ['allow', 'allow_session', 'deny'] : ['allow', 'deny'];
+}
+
+const SESSION_SCOPE_MAX = 160;
+
+/**
+ * What "allow for this session" lets through, as shown on its button: Claude Code's rules (`Bash(npm test:*)`) and
+ * extra folders. null when there is nothing, or too much to show on one line (then the button is not offered).
+ */
+export function sessionScope(session: ClaudePermissionUpdate[]): string | null {
+  const parts = session.flatMap((u) =>
+    u.type === 'addRules' ? u.rules.map((r) => (r.ruleContent === undefined ? r.toolName : `${r.toolName}(${r.ruleContent})`)) : u.directories,
+  );
+  const scope = parts.join(', ');
+  return scope && scope.length <= SESSION_SCOPE_MAX && !/[\r\n]/.test(scope) ? scope : null;
 }
 
 export type ClaudePermissionUpdate =

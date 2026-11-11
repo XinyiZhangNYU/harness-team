@@ -81,11 +81,8 @@ export const api = {
       `/api/agents/handle-suggestion?displayName=${encodeURIComponent(displayName)}&runtimeKind=${runtimeKind}`,
     ).then((r) => r.handle),
   modelCatalog: (kind: RuntimeKind, opts: { refresh?: boolean; cwd?: string } = {}) => {
-    const q = new URLSearchParams();
-    if (opts.refresh) q.set('refresh', '1');
-    if (opts.cwd) q.set('cwd', opts.cwd);
-    const qs = q.toString();
-    return request<{ catalog: RuntimeModelCatalog }>('GET', `/api/runtimes/${kind}/models${qs ? `?${qs}` : ''}`).then((r) => r.catalog);
+    const body = { refresh: opts.refresh === true, cwd: opts.cwd || null };
+    return request<{ catalog: RuntimeModelCatalog }>('POST', `/api/runtimes/${kind}/models`, body).then((r) => r.catalog);
   },
   chatProviders: () => request<ChatProvidersResponse>('GET', '/api/chat-providers'),
   createChatProvider: (req: SaveChatProviderRequest) =>

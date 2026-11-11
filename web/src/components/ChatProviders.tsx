@@ -927,6 +927,7 @@ export function ChatSettingsFields(props: { value: ChatMemberSettings; model: Ch
   const t = useT();
   const v = props.value;
   const webOff = !!props.model && !props.model.webSearch;
+  const fetchOff = !!props.model && !props.model.tools;
   return (
     <>
       <div className="check-grid">
@@ -937,6 +938,10 @@ export function ChatSettingsFields(props: { value: ChatMemberSettings; model: Ch
         <label className={`check${webOff ? ' disabled' : ''}`} title={webOff ? t('cp.webSearchUnsupported') : undefined}>
           <input type="checkbox" checked={v.webSearch && !webOff} disabled={webOff} onChange={(e) => props.onChange({ ...v, webSearch: e.target.checked })} />
           <span>{t('cp.webSearch')}</span>
+        </label>
+        <label className={`check${fetchOff ? ' disabled' : ''}`} title={fetchOff ? t('cp.webFetchUnsupported') : undefined}>
+          <input type="checkbox" checked={!!v.webFetch && !fetchOff} disabled={fetchOff} onChange={(e) => props.onChange({ ...v, webFetch: e.target.checked })} />
+          <span>{t('cp.webFetch')}</span>
         </label>
       </div>
       <div className="field-row">

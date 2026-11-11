@@ -7,6 +7,9 @@ import {
   finishHeaders,
   joinUrl,
   loadParts,
+  type LoadedPart,
+  toolMediaParts,
+  TOOL_MEDIA_INTRO,
   parseJson,
   rawFits,
   type StopKind,
@@ -42,6 +45,13 @@ function replayItems(items: unknown): Item[] {
   return out;
 }
 
+const partJson = (p: LoadedPart): Json =>
+  p.type === 'text'
+    ? { type: 'input_text', text: p.text }
+    : p.type === 'image'
+      ? { type: 'input_image', image_url: `data:${p.mime};base64,${p.data}` }
+      : { type: 'input_file', filename: p.name, file_data: `data:application/pdf;base64,${p.data}` };
+
 export const openaiResponses: WireFormat = {
   async build(spec) {
     const input: Item[] = [];
@@ -50,13 +60,7 @@ export const openaiResponses: WireFormat = {
         input.push({ role: 'user', content: [{ type: 'input_text', text: SUMMARY_PREFIX + it.text }] });
       } else if (it.role === 'user') {
         const parts = await loadParts(it.parts, spec.model);
-        const content: Json[] = parts.map((p): Json =>
-          p.type === 'text'
-            ? { type: 'input_text', text: p.text }
-            : p.type === 'image'
-              ? { type: 'input_image', image_url: `data:${p.mime};base64,${p.data}` }
-              : { type: 'input_file', filename: p.name, file_data: `data:application/pdf;base64,${p.data}` },
-        );
+        const content: Json[] = parts.map(partJson);
         const prev = input[input.length - 1];
         if (prev?.role === 'user' && Array.isArray(prev.content)) (prev.content as Json[]).push(...content);
         else input.push({ role: 'user', content: content.length ? content : [{ type: 'input_text', text: ' ' }] });
@@ -69,6 +73,9 @@ export const openaiResponses: WireFormat = {
         for (const c of it.toolCalls) input.push({ type: 'function_call', call_id: c.id, name: c.name, arguments: c.args || '{}' });
       } else {
         for (const r of it.results) input.push({ type: 'function_call_output', call_id: r.callId, output: r.content });
+        // Images and PDFs a tool returned follow as a user message (understood by every Responses-compatible API).
+        const media = toolMediaParts(it.results, spec.model);
+        if (media.length) input.push({ role: 'user', content: [{ type: 'input_text', text: TOOL_MEDIA_INTRO }, ...media.map(partJson)] });
       }
     }
     const tools: Json[] = sortedTools(spec.tools).map((t) => ({

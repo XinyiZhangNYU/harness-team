@@ -77,8 +77,9 @@ export class GrokAdapter extends AcpAdapter<GrokAdapterOptions> {
     return PERMISSION_MODES.grok;
   }
 
+  /** Grok falls back to XAI_API_KEY (billed as xAI API usage) when its login is missing or expired. */
   protected billing(): RuntimeBilling {
-    return 'subscription';
+    return (this.opts.baseEnv ?? process.env).XAI_API_KEY?.trim() ? 'metered_api' : 'subscription';
   }
 
   protected availableNote(version: string | null): Localized {

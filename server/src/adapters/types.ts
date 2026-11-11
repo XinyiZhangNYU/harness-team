@@ -298,6 +298,10 @@ export type TurnEvent =
       detail?: string | null;
       /** Decisions the native request can take from a human; always includes 'deny'. */
       options: ApprovalDecision[];
+      /** With `allow_prefix`: the command prefix it lets through (shown on the button). */
+      prefix?: string | null;
+      /** With `allow_session`: what it lets through for the rest of the session, when the runtime says (on the button). */
+      scope?: string | null;
     }
   /** The runtime reported the request resolved (by our decision, a cancel, or its own lifecycle). */
   | { type: 'approval.resolved'; nativeRequestId: string; decision?: string | null }

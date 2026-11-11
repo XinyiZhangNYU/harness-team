@@ -182,6 +182,12 @@ export class ChatProviders {
       .run(ref, hint, id);
   }
 
+  /** Environment variables that hold a provider's key (kept from the commands chat members run). */
+  keyEnvNames(): string[] {
+    const rows = this.db.prepare("SELECT key_ref FROM providers WHERE key_ref LIKE 'env:%'").all() as { key_ref: string }[];
+    return rows.map((r) => String(r.key_ref).slice(4));
+  }
+
   /** The key for a request, or null when none is set / the variable is empty. Never logged. */
   async key(id: string): Promise<string | null> {
     const r = this.db.prepare('SELECT key_ref, chat FROM providers WHERE id = ?').get(id) as Row | undefined;

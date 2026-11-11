@@ -132,8 +132,6 @@ const MAX_HOP_LIMIT = 20;
 const DUPLICATE_WINDOW_MS = 120_000;
 /** Delivery error of an agent-to-agent message that Antigravity's restricted mode did not deliver. */
 const RESTRICTED_ERROR = 'antigravity restricted mode: no agent-to-agent wake-up';
-/** Delivery error of a chat member's message to a coding member the user has not addressed in the room. */
-const CHAT_GATE_ERROR = 'chat member: the user has not @mentioned this coding member in the chat';
 const AGENT_BODY_MAX = 8_000;
 
 /**
@@ -1220,6 +1218,11 @@ export class Core {
     const existing = this.store.findByClientMessageId(roomId, clientMessageId);
     if (existing) return existing;
 
+    const toAll = parseSlashCommand(text);
+    if (toAll && handleKey(toAll.handle) === ALL_HANDLE && (toAll.name === 'compact' || this.isMemberCommand(roomId, toAll.name))) {
+      return this.postCommandToAll(roomId, text, toAll.name, toAll.args, clientMessageId, attachmentIds);
+    }
+
     const command = this.commandOf(roomId, text);
     if (command) {
       const name = command.spec.name;
@@ -1278,6 +1281,58 @@ export class Core {
     if (contentRedacted && targets.length) this.pendingUserInputs.set(message.id, { roomId, body: text, commandArgs: command?.args });
     this.bus.publish({ type: 'message.created', message });
     this.deliver(message, targets, 'user', 0);
+    return message;
+  }
+
+  /** Whether some member of the room offers `/name` (a runtime command or a listed skill). */
+  private isMemberCommand(roomId: string, name: string): boolean {
+    return this.store.listMembers(roomId).some((a) => {
+      if (this.registry.get(a.runtimeKind)?.describe().capabilities.commands?.some((x) => x.name === name)) return true;
+      const hit = this.skills.get(a.id);
+      return !!hit && hit.workspace === a.workspace && hit.value.some((x) => x.name.toLowerCase() === name);
+    });
+  }
+
+  /**
+   * `@all /compact`: one command message delivered to every member whose runtime has a native `/compact` (a busy member
+   * runs it after its current turn); the others are named in a notice. Only `/compact`, and without arguments: what to
+   * keep differs per member, and every other command is per member.
+   */
+  private postCommandToAll(roomId: string, text: string, name: string, args: string, clientMessageId: string, attachmentIds: string[]): Message {
+    if (name !== 'compact') {
+      throw new CoreError(400, L('@all 只能用 /compact；/{name} 请单独 @ 成员', '@all only takes /compact; send /{name} to one member at a time', { name }));
+    }
+    if (args.trim()) {
+      throw new CoreError(400, L('@all /compact 不带参数；要说明保留什么，请单独 @ 成员', '@all /compact takes no arguments; to say what to keep, send it to one member at a time'));
+    }
+    if (attachmentIds.length) throw new CoreError(400, L('命令 /{name} 不能附带文件', 'The command /{name} cannot carry attachments', { name }));
+    const members = this.store.listMembers(roomId);
+    const runtime = (a: Agent) => this.registry.get(a.runtimeKind)?.describe();
+    const supports = (a: Agent) => !!runtime(a)?.capabilities.commands?.some((x) => x.name === name && x.action === 'native');
+    const targets = members.filter(supports);
+    const skipped = members.filter((a) => !supports(a));
+    if (!targets.length) {
+      throw new CoreError(400, L('群里没有成员支持 /compact', 'No member of this chat supports /compact'));
+    }
+    const body = redactText(text);
+    const message = this.store.insertMessage({
+      roomId,
+      kind: 'chat',
+      senderKind: 'user',
+      senderId: 'user',
+      body,
+      contentRedacted: body !== text,
+      status: 'complete',
+      mentions: targets.map((a) => a.handle),
+      clientMessageId,
+      meta: { type: 'command', agentId: ALL_HANDLE, name, args: '' } satisfies MessageMeta,
+    });
+    this.bus.publish({ type: 'message.created', message });
+    this.deliver(message, targets, 'user', 0);
+    if (skipped.length) {
+      const runtimes = [...new Set(skipped.map((a) => runtime(a)?.label ?? a.runtimeKind))];
+      this.systemNotice(roomId, N('command.allSkipped', { who: skipped.map((a) => '@' + a.handle), runtimes }), message.id);
+    }
     return message;
   }
 
@@ -1700,10 +1755,6 @@ export class Core {
     const overLimit = origin === 'agent' && limit !== null && hop > limit;
     const created: DeliveryInfo[] = [];
     const restricted = new Set<string>();
-    const gated = new Set<string>();
-    // A chat member wakes a coding member (one that can change files or run commands) only after the user has
-    // addressed that member in this chat themselves.
-    const fromChat = origin === 'agent' && message.senderKind === 'agent' && this.store.getAgent(message.senderId)?.runtimeKind === 'chat';
     for (const agent of targets) {
       let state: 'queued' | 'held' | 'skipped' = 'queued';
       let error: string | null = null;
@@ -1711,10 +1762,6 @@ export class Core {
         state = 'skipped';
         error = RESTRICTED_ERROR;
         restricted.add(agent.id);
-      } else if (fromChat && agent.runtimeKind !== 'chat' && !this.store.userAddressed(room.id, agent.id)) {
-        state = 'skipped';
-        error = CHAT_GATE_ERROR;
-        gated.add(agent.id);
       } else if (origin === 'agent' && outsideTurn) {
         state = 'skipped';
         error = 'posted outside a turn: no automatic wake-up';
@@ -1742,11 +1789,7 @@ export class Core {
     if (blocked.length) {
       this.systemNotice(room.id, N('delivery.restricted', { seq: message.seq, who: blocked.map((d) => '@' + this.handleOf(d.agentId)) }), message.id);
     }
-    const gatedNow = created.filter((d) => gated.has(d.agentId));
-    if (gatedNow.length) {
-      this.systemNotice(room.id, N('delivery.chatGate', { seq: message.seq, who: gatedNow.map((d) => '@' + this.handleOf(d.agentId)) }), message.id);
-    }
-    const skipped = created.filter((d) => d.state === 'skipped' && !restricted.has(d.agentId) && !gated.has(d.agentId));
+    const skipped = created.filter((d) => d.state === 'skipped' && !restricted.has(d.agentId));
     if (skipped.length) {
       const who = skipped.map((d) => '@' + this.handleOf(d.agentId));
       this.systemNotice(
@@ -1788,7 +1831,7 @@ export class Core {
         const roomId = st.queue[0]!.roomId;
         st.activeRoom = roomId;
         // A shared working directory is used by one agent at a time (no concurrent edits of the same files).
-        const key = this.workspaceKey(this.store.getAgent(agentId));
+        const key = this.workspaceKey(this.store.getAgent(agentId), roomId);
         if (key && !(await this.acquireWorkspace(agentId, key, roomId))) {
           st.activeRoom = null;
           continue;
@@ -2053,7 +2096,10 @@ export class Core {
       }
       return t;
     };
-    const notice = (n: NoticeText | string) => {
+    // After `@all /compact` several members answer the same message: their notices say whose they are.
+    const fromAll = source.meta?.type === 'command' && source.meta.agentId === ALL_HANDLE;
+    const notice = (raw: NoticeText | string) => {
+      let n = fromAll ? N('command.memberNotice', { handle: agent.handle, text: raw }) : raw;
       if (slotFilled) return this.systemNotice(room.id, n, source.id);
       const safe = redactLocalized(n).value;
       const contentRedacted = JSON.stringify(safe) !== JSON.stringify(n);
@@ -2122,13 +2168,18 @@ export class Core {
             nativeItemId: ev.itemId ?? null,
             nativeRequestId: ev.nativeRequestId,
             nativeMethod: ev.nativeMethod,
-            title: redactText(ev.title),
-            detail: ev.detail ? redactText(ev.detail) : null,
+            // Shown exactly as it will run: a redacted card could hide the part that executes (`--password "$(…)"`).
+            title: ev.title,
+            detail: ev.detail ?? null,
             state: 'pending',
             options: session.respondApproval ? options : [],
-            workspace: agent.workspace ?? null,
+            // A chat member's web page request has nothing to do with the project folder.
+            workspace:
+              agent.workspace ?? (agent.runtimeKind === 'chat' && ev.nativeMethod !== 'chat/fetch_url' ? (room.projectDir ?? null) : null),
             ...(ev.label ? { label: ev.label } : {}),
             ...(ev.reason ? { reason: redactStrings(ev.reason) } : {}),
+            ...(ev.prefix ? { prefix: ev.prefix } : {}),
+            ...(ev.scope ? { scope: ev.scope } : {}),
           };
           const id = claim('approval', meta, meta.title, 'streaming');
           approvals.set(ev.nativeRequestId, id);
@@ -2266,9 +2317,18 @@ export class Core {
     }
   }
 
-  /** Same directory => same key, however it is spelled (see pathKey). Agents without a workspace never wait. */
-  private workspaceKey(agent: Agent | undefined): string | null {
-    return agent?.workspace ? pathKey(agent.workspace) : null;
+  /**
+   * Same directory => same key, however it is spelled (see pathKey). Agents without a workspace never wait. A chat
+   * member that may write (a permission mode other than read-only) works in the room's project folder, so it takes
+   * that folder's turn like a coding member there.
+   */
+  private workspaceKey(agent: Agent | undefined, roomId: string): string | null {
+    if (agent?.workspace) return pathKey(agent.workspace);
+    if (agent && chatMayWrite(agent)) {
+      const dir = this.store.getRoom(roomId)?.projectDir;
+      return dir ? pathKey(dir) : null;
+    }
+    return null;
   }
 
   /**
@@ -2656,6 +2716,11 @@ const EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,19}$/;
  */
 /** How long a runtime's report of which permission modes it allows is used to refuse a choice. */
 const MODE_REPORT_TTL_MS = 15 * 60_000;
+
+/** A chat member whose permission mode lets it write files and run commands (see PERMISSION_MODES.chat). */
+function chatMayWrite(agent: Agent): boolean {
+  return agent.runtimeKind === 'chat' && !!agent.permissionMode && agent.permissionMode !== 'read-only';
+}
 
 function checkPermissionRisk(mode: PermissionMode | null, ack: string | undefined) {
   if (mode && RISKY_PERMISSION_MODES.includes(mode) && ack !== PERMISSION_WARNING_VERSION) {
