@@ -1,4 +1,4 @@
-import { opendirSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, opendirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /** Default file systems that ignore case (NTFS on Windows, APFS / HFS+ on macOS); used only when a folder cannot be asked. */
@@ -6,28 +6,56 @@ const DEFAULT_IGNORES_CASE = process.platform === 'win32' || process.platform ==
 
 /** The real path of `p` (see realPath) and the real path of its nearest existing part. */
 function resolveReal(p: string): { real: string; existing: string | null } {
-  const abs = resolve(p);
-  const tail: string[] = [];
-  for (let head = abs; ; ) {
-    try {
-      const existing = realpathSync.native(head);
-      return { real: tail.length ? join(existing, ...tail.reverse()) : existing, existing };
-    } catch {
-      const parent = dirname(head);
-      if (parent === head) return { real: abs, existing: null };
-      tail.push(basename(head));
-      head = parent;
+  let abs = resolve(p);
+  // A link whose target does not exist (yet) is followed, as writing through it would: its name is not a new file in
+  // the folder that holds the link. Bounded, so a link loop ends.
+  for (let hops = 0; ; ) {
+    const tail: string[] = [];
+    let next: string | null = null;
+    for (let head = abs; ; ) {
+      try {
+        const existing = realpathSync.native(head);
+        return { real: tail.length ? join(existing, ...tail.reverse()) : existing, existing };
+      } catch {
+        const target = hops < 40 ? linkTarget(head) : null;
+        if (target !== null) {
+          next = resolve(dirname(head), target, ...tail.reverse());
+          break;
+        }
+        const parent = dirname(head);
+        if (parent === head) return { real: abs, existing: null };
+        tail.push(basename(head));
+        head = parent;
+      }
     }
+    hops++;
+    abs = next;
+  }
+}
+
+/** Where a symlink (or junction) points, as stored; null when `p` is not one. */
+function linkTarget(p: string): string | null {
+  try {
+    return lstatSync(p).isSymbolicLink() ? readlinkSync(p) : null;
+  } catch {
+    return null;
   }
 }
 
 /**
  * `p` with symlinks and junctions resolved (on macOS also `/tmp` → `/private/tmp`, `/var` → `/private/var`). A part
- * that does not exist yet is kept as written after the real path of its nearest existing parent. Never throws.
+ * that does not exist yet is kept as written after the real path of its nearest existing parent; a link whose target
+ * does not exist is followed to where that target would be. Never throws.
  */
 export function realPath(p: string): string {
   return resolveReal(p).real;
 }
+
+/**
+ * A file name the way a volume that ignores case compares it, for deny lists: compatibility forms and case folded, so
+ * `.claudſ` style spellings (`ſ` → `s`, Kelvin `K` → `k`) that APFS or NTFS open as the listed name are caught.
+ */
+export const foldName = (name: string) => name.normalize('NFKC').toLowerCase();
 
 const LETTER = /[A-Za-z]/;
 const swapCase = (s: string) => s.replace(/[A-Za-z]/g, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));

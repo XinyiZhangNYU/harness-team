@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import type { FileChange, PermissionMode } from '../../../../shared/protocol.ts';
+import { foldName } from '../../path-key.ts';
 import { redactText } from '../../redact.ts';
 import { inside, isBinary, ProjectToolError } from './project-tools.ts';
 import type { ToolDef } from './wire.ts';
@@ -43,7 +44,7 @@ const AGENT_CONFIG_FILES = new Set(['.mcp.json', 'opencode.json', 'opencode.json
  * "allow all file changes", and never covered by a session grant.
  */
 export function isAgentConfig(rel: string): boolean {
-  const parts = rel.toLowerCase().split(/[\\/]/);
+  const parts = foldName(rel).split(/[\\/]/);
   return parts.slice(0, -1).some((p) => AGENT_CONFIG_DIRS.has(p)) || AGENT_CONFIG_FILES.has(parts.at(-1)!);
 }
 

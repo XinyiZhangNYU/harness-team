@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import Markdown from 'react-markdown';
+import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { noticeCode } from '../../../shared/notices.ts';
 import type { AgentWithStatus, DeliveryInfo, Message, MessageIntent } from '../../../shared/protocol.ts';
@@ -16,6 +16,9 @@ function statusLabel(t: TFunc, s: Message['status']): string | null {
 }
 
 const intentLabel = (t: TFunc, i: MessageIntent) => t(`intent.${i}`);
+
+/** Markdown images show their alt text instead of being fetched. */
+export const NO_IMAGES: Components = { img: ({ alt }) => (alt ? <span>{alt}</span> : null) };
 
 export const MessageItem = memo(function MessageItem(props: {
   message: Message;
@@ -91,8 +94,11 @@ export const MessageItem = memo(function MessageItem(props: {
       {(body || !m.attachments?.length) && (
         <div className={`msg-body markdown${noticeMeta ? ' msg-body-notice' : ''}`}>
           {body ? (
-            // react-markdown does not render raw HTML by default; CSP additionally blocks remote images.
-            <Markdown remarkPlugins={[remarkGfm]}>{body}</Markdown>
+            // react-markdown does not render raw HTML by default. Images are not loaded at all: a same-origin URL would be
+            // requested with the session cookie as soon as a member's reply shows (CSP only blocks remote ones).
+            <Markdown remarkPlugins={[remarkGfm]} components={NO_IMAGES}>
+              {body}
+            </Markdown>
           ) : (
             <span className="muted">…</span>
           )}

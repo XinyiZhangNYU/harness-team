@@ -17,15 +17,23 @@ const NO_DIRECT_OPEN = new Set(
     'exe com scr pif bat cmd ps1 psm1 psd1 vbs vbe js jse mjs cjs wsf wsh wsc hta msi msp mst msix msixbundle appx ' +
     'appxbundle appinstaller application appref-ms lnk url website reg inf scf cpl dll sys ocx drv jar py pyw rb pl sh ' +
     'html htm xhtml mht mhtml svg shtml xml chm hlp msc gadget settingcontent-ms library-ms search-ms searchconnector-ms ' +
-    'iso img vhd vhdx xll xla xlam ppam docm dotm xlsm xltm pptm potm sldm'
+    'iso img vhd vhdx xll xla xlam ppam docm dotm xlsm xltm pptm potm sldm ' +
+    // macOS: Terminal runs these, Finder follows location files, installers, profiles, bundles and scripts.
+    'command terminal tool fileloc webloc inetloc afploc ftploc pkg mpkg dmg sparseimage sparsebundle mobileconfig ' +
+    'mobileprovision shortcut scpt scptd applescript workflow wflow action app prefpane kext plugin bundle osax saver ' +
+    'qlgenerator mdimporter xpc webarchive jnlp zsh bash csh tcsh ksh fish ' +
+    // Linux desktops: launchers and self-running packages.
+    'desktop appimage run deb rpm flatpakref snap'
   ).split(' '),
 );
 
 /** @param {string} name */
 function canOpenDirectly(name) {
-  const m = /\.([^.\\/]+)$/.exec(name);
+  // Windows drops trailing dots and spaces when it opens a name; the extension is folded the way file systems that
+  // ignore case fold it.
+  const m = /\.([^.\\/]+)$/.exec(name.replace(/[. ]+$/, ''));
   // No extension: Windows would ask which program to use, harmless but useless; show it in the folder.
-  return !!m && !NO_DIRECT_OPEN.has(m[1].toLowerCase());
+  return !!m && !NO_DIRECT_OPEN.has(m[1].normalize('NFKC').toLowerCase());
 }
 
 /**

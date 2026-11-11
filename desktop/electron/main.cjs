@@ -529,6 +529,12 @@ function main() {
       await message({ type: 'warning', buttons: [tr('好', 'OK')], message: tr('找不到这个文件夹', 'This folder was not found'), detail: String(dir || '') });
       return;
     }
+    // On macOS a folder with an extension may be a package (an .app, .prefpane, .pkg…), which opening would launch or
+    // install: it is selected in Finder instead.
+    if (process.platform === 'darwin' && path.extname(path.resolve(dir))) {
+      shell.showItemInFolder(path.resolve(dir));
+      return;
+    }
     const err = await shell.openPath(dir);
     if (err) log.write(`[shell] open folder failed: ${err}`);
   }

@@ -4,7 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { createContext, Script } from 'node:vm';
 import { ATTACHMENT_LIMITS } from '../../../../shared/protocol.ts';
 import { isPdf, sniffImage } from '../../attachments.ts';
-import { realPath, relativeInside } from '../../path-key.ts';
+import { foldName, realPath, relativeInside } from '../../path-key.ts';
 import { redactText } from '../../redact.ts';
 import { DOC_LABEL, docKind, extractDocument, ExtractError, legacyOffice } from './extract.ts';
 import type { ToolDef, ToolMedia } from './wire.ts';
@@ -35,6 +35,9 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '.hg', '.svn', '__pycache__',
 /** Names that usually hold secrets: never listed as readable, never read, never searched. */
 const SECRET_NAME =
   /^(\.env(\..*)?|\.envrc|\.npmrc|\.pypirc|\.netrc|_netrc|\.git-credentials|\.dockercfg|credentials(\.\w+)?|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|.*\.(pem|key|p12|pfx|jks|keystore|kdbx|ppk|asc|gpg))$/i;
+
+/** Whether a name (folded as the file system may fold it) usually holds secrets. */
+export const isSecretName = (name: string) => SECRET_NAME.test(foldName(name));
 
 export const PROJECT_TOOL_NAMES = ['list_dir', 'glob', 'read_file', 'search'] as const;
 
@@ -123,8 +126,8 @@ export function inside(root: string, dataDir: string, p: unknown): { abs: string
   if (rel === null) throw new ProjectToolError(`not inside the project folder: ${raw}`);
   if (relativeInside(realPath(dataDir), real) !== null || real === realPath(dataDir)) throw new ProjectToolError('this folder is not available');
   for (const part of rel.split('/')) {
-    if (part && SECRET_NAME.test(part)) throw new ProjectToolError(`not available (may hold secrets): ${rel}`);
-    if (part === '.git') throw new ProjectToolError('the .git folder is not available');
+    if (part && isSecretName(part)) throw new ProjectToolError(`not available (may hold secrets): ${rel}`);
+    if (foldName(part) === '.git') throw new ProjectToolError('the .git folder is not available');
   }
   return { abs: real, rel: rel || '.' };
 }
@@ -226,7 +229,7 @@ async function walkFiles(base: string, dataDir: string, signal: AbortSignal | un
         return;
       }
       // Links are not followed (they may point out of the project).
-      if (e.isSymbolicLink() || SECRET_NAME.test(e.name)) continue;
+      if (e.isSymbolicLink() || isSecretName(e.name)) continue;
       const p = join(dir, e.name);
       const rel = prefix ? `${prefix}/${e.name}` : e.name;
       if (e.isDirectory()) {
@@ -336,10 +339,10 @@ export async function runProjectTool(
     entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
     const lines: string[] = [];
     for (const e of entries.slice(0, LIST_MAX)) {
-      if (e.name === '.git') continue;
+      if (foldName(e.name) === '.git') continue;
       if (e.isDirectory()) lines.push(`${e.name}/`);
       else if (e.isSymbolicLink()) lines.push(`${e.name} (link)`);
-      else if (SECRET_NAME.test(e.name)) lines.push(`${e.name} (not readable)`);
+      else if (isSecretName(e.name)) lines.push(`${e.name} (not readable)`);
       else {
         let size = '';
         try {
@@ -399,7 +402,7 @@ export async function runProjectTool(
       if (st.size > DOC_MAX_BYTES) throw new ProjectToolError(`${rel} is too large to unpack (${st.size} bytes; at most ${mb(DOC_MAX_BYTES)})`);
       let text: string;
       try {
-        text = extractDocument(await readFile(abs), kind, DOC_MAX_CHARS, (n) => SECRET_NAME.test(n)).text;
+        text = extractDocument(await readFile(abs), kind, DOC_MAX_CHARS, isSecretName).text;
       } catch (e) {
         if (e instanceof ExtractError) throw new ProjectToolError(`cannot read the text of ${rel}: ${e.message}`);
         throw e;
