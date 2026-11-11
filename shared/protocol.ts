@@ -5,7 +5,7 @@ export type { Localized, NoticeText } from './notices.ts';
 // Keep this file free of runtime dependencies so both sides can import it.
 
 /** `chat` = a chat member: Harness Team calls a model API with the user's own key (no external harness). */
-export type RuntimeKind = 'mock' | 'codex' | 'claude' | 'antigravity' | 'dsh' | 'opencode' | 'cursor' | 'grok' | 'chat';
+export type RuntimeKind = 'mock' | 'codex' | 'claude' | 'antigravity' | 'dsh' | 'opencode' | 'cursor' | 'grok' | 'kimi' | 'chat';
 
 /**
  * How far other members may orchestrate an Antigravity member (an automatic-orchestration permission, not an auth or
@@ -244,7 +244,7 @@ export const AGENT_AVATAR_MAX = 120_000;
 export const isAgentAvatar = (v: unknown): v is string => typeof v === 'string' && v.length <= AGENT_AVATAR_MAX && AGENT_AVATAR_RE.test(v);
 
 /** Runtimes that can have a default member avatar: shown for that runtime's members without a picture of their own. */
-export const AVATAR_DEFAULT_KINDS = ['claude', 'codex', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok'] as const;
+export const AVATAR_DEFAULT_KINDS = ['claude', 'codex', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi'] as const;
 export type AvatarDefaultKind = (typeof AVATAR_DEFAULT_KINDS)[number];
 /** Chat members take their default avatar per saved model provider: `chat:<ChatProvider.id>`. */
 export type AvatarDefaultKey = AvatarDefaultKind | `chat:${string}`;
@@ -275,6 +275,9 @@ export type RuntimeBilling = 'subscription' | 'metered_api';
  *   is sent and OpenCode's own permission rules apply.
  * - Cursor: its ACP session mode: agent (tools still ask through session/request_permission), plan (read-only
  *   planning) or ask (read-only Q&A). Offered only when `agent acp` reports them.
+ * - Kimi Code: its ACP session mode: default (asks before edits and commands), plan (read-only planning), auto
+ *   (Kimi approves what it considers safe and asks for the rest) or yolo (approves everything). Offered only when
+ *   `kimi acp` reports them.
  * Whether this machine allows a mode (local settings, managed requirements, what the runtime reports) is in
  * RuntimeModelCatalog.permissionModes.
  * The modes in RISKY_PERMISSION_MODES run tools without any approval and need the user's confirmation of
@@ -285,7 +288,8 @@ export type CodexPermissionMode = 'read-only' | 'workspace-write' | 'untrusted' 
 export type AntigravityPermissionMode = 'default' | 'accept-edits' | 'plan' | 'skip-permissions';
 export type OpenCodePermissionMode = 'build' | 'plan';
 export type CursorPermissionMode = 'agent' | 'plan' | 'ask';
-export type PermissionMode = ClaudePermissionMode | CodexPermissionMode | AntigravityPermissionMode | OpenCodePermissionMode | CursorPermissionMode;
+export type KimiPermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
+export type PermissionMode = ClaudePermissionMode | CodexPermissionMode | AntigravityPermissionMode | OpenCodePermissionMode | CursorPermissionMode | KimiPermissionMode;
 export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = {
   claude: ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
   codex: ['read-only', 'workspace-write', 'untrusted', 'auto-review', 'full-access'],
@@ -295,11 +299,12 @@ export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = 
   cursor: ['agent', 'plan', 'ask'],
   // `grok agent stdio` reports no session modes and ignores plan: Grok's own permission setting applies.
   grok: [],
+  kimi: ['default', 'plan', 'auto', 'yolo'],
   mock: [],
   chat: [],
 };
 /** Modes in which nothing asks for approval at all. Choosing one needs `acknowledgePermissionRisk`. */
-export const RISKY_PERMISSION_MODES: readonly PermissionMode[] = ['bypassPermissions', 'full-access', 'skip-permissions'];
+export const RISKY_PERMISSION_MODES: readonly PermissionMode[] = ['bypassPermissions', 'full-access', 'skip-permissions', 'yolo'];
 /** Version of the warning shown before a risky mode is chosen; a new text gets a new version. */
 export const PERMISSION_WARNING_VERSION = 'perm-skip-2026-11-08';
 
@@ -354,6 +359,8 @@ export interface RuntimeModelOption {
   defaultEffort: string | null;
   /** The runtime's own default model. */
   isDefault: boolean;
+  /** How this model is billed when the runtime's model id tells (absent = the runtime's billing). */
+  billing?: RuntimeBilling | null;
 }
 
 /** Where a recent workspace was found: Codex threads, Claude Code session logs, or existing Harness Team members. */
@@ -518,6 +525,8 @@ export type MessageMeta =
       notice: NoticeText;
       /** A member's stored session could not be resumed: the user decides what happens (see `Core.chooseSession`). */
       sessionChoice?: SessionChoice;
+      /** A member's reply that ended as a notice (failed, no text): how the member was billed then. */
+      billing?: RuntimeBilling | null;
     }
   | {
       type: 'chat';
@@ -528,6 +537,8 @@ export type MessageMeta =
       /** Set when the agent posted this through the Team MCP `send_message` tool (not its turn reply). */
       via?: 'team_mcp';
       intent?: MessageIntent | null;
+      /** How the member was billed when it wrote this (absent on older messages: its current billing is shown). */
+      billing?: RuntimeBilling | null;
     }
   | {
       type: 'activity';
@@ -657,7 +668,7 @@ export function parseSlashCommand(text: string): { handle: string; name: string;
  * - claude-native-cli: user's unmodified `claude` CLI in -p stream-json mode (claude.ai subscription login)
  * - claude-agent-sdk-api: planned, Claude Agent SDK with the user's own Console API key (not implemented)
  */
-export type RuntimeBackend = 'mock' | 'codex-app-server' | 'claude-native-cli' | 'claude-agent-sdk-api' | 'antigravity-acp' | 'dsh-acp' | 'opencode-acp' | 'cursor-acp' | 'grok-acp' | 'chat-api';
+export type RuntimeBackend = 'mock' | 'codex-app-server' | 'claude-native-cli' | 'claude-agent-sdk-api' | 'antigravity-acp' | 'dsh-acp' | 'opencode-acp' | 'cursor-acp' | 'grok-acp' | 'kimi-acp' | 'chat-api';
 
 export interface RuntimeDescriptor {
   kind: RuntimeKind;

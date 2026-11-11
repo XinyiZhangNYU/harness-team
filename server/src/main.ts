@@ -22,6 +22,7 @@ const { values } = parseArgs({
     'no-opencode': { type: 'boolean', default: false },
     'no-cursor': { type: 'boolean', default: false },
     'no-grok': { type: 'boolean', default: false },
+    'no-kimi': { type: 'boolean', default: false },
   },
 });
 
@@ -43,6 +44,7 @@ const detectOpts = {
   opencode: !values['no-opencode'],
   cursor: !values['no-cursor'],
   grok: !values['no-grok'],
+  kimi: !values['no-kimi'],
   codexProtocolLog: process.env.HT_CODEX_PROTOCOL_LOG || undefined,
   claudeProtocolLog: process.env.HT_CLAUDE_PROTOCOL_LOG || undefined,
   antigravityProtocolLog: process.env.HT_ANTIGRAVITY_PROTOCOL_LOG || undefined,
@@ -50,6 +52,7 @@ const detectOpts = {
   opencodeProtocolLog: process.env.HT_OPENCODE_PROTOCOL_LOG || undefined,
   cursorProtocolLog: process.env.HT_CURSOR_PROTOCOL_LOG || undefined,
   grokProtocolLog: process.env.HT_GROK_PROTOCOL_LOG || undefined,
+  kimiProtocolLog: process.env.HT_KIMI_PROTOCOL_LOG || undefined,
 };
 const found = await detectRuntimes(detectOpts);
 const codex = found.codex.detection;
@@ -72,7 +75,8 @@ try {
   opencode: found.opencode.options ?? null,
   cursor: found.cursor.options ?? null,
   grok: found.grok.options ?? null,
-  missingRuntimes: { codex: found.codex.missing, claude: found.claude.missing, antigravity: found.antigravity.missing, dsh: found.dsh.missing, opencode: found.opencode.missing, cursor: found.cursor.missing, grok: found.grok.missing },
+  kimi: found.kimi.options ?? null,
+  missingRuntimes: { codex: found.codex.missing, claude: found.claude.missing, antigravity: found.antigravity.missing, dsh: found.dsh.missing, opencode: found.opencode.missing, cursor: found.cursor.missing, grok: found.grok.missing, kimi: found.kimi.missing },
   detectRuntimes: () => detectRuntimes(detectOpts),
   secrets: parentPort ? parentPortSecretBox(parentPort) : null,
   });
@@ -142,6 +146,13 @@ if (found.grok.options) {
   if (process.env.HT_GROK_PROTOCOL_LOG) console.log(`  Raw Grok ACP protocol log: ${process.env.HT_GROK_PROTOCOL_LOG}`);
 } else {
   console.log(`Grok runtime: not available (${localized(found.grok.missing!, 'en')})`);
+}
+if (found.kimi.options) {
+  const d = found.kimi.detection!;
+  console.log(`Kimi runtime: ${d.version ?? 'version reported at initialize'} (${[d.command, ...d.argsPrefix].join(' ')} acp) - counts against your Kimi membership`);
+  if (process.env.HT_KIMI_PROTOCOL_LOG) console.log(`  Raw Kimi ACP protocol log: ${process.env.HT_KIMI_PROTOCOL_LOG}`);
+} else {
+  console.log(`Kimi runtime: not available (${localized(found.kimi.missing!, 'en')})`);
 }
 console.log('Mock agents are simulated.');
 

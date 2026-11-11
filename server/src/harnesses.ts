@@ -9,6 +9,7 @@ import { type DshAdapterOptions, type DshDetection, detectDsh } from './adapters
 import { type OpenCodeAdapterOptions, type OpenCodeDetection, detectOpenCode } from './adapters/opencode/adapter.ts';
 import { type CursorAdapterOptions, type CursorDetection, detectCursor } from './adapters/cursor/adapter.ts';
 import { type GrokAdapterOptions, type GrokDetection, detectGrok } from './adapters/grok/adapter.ts';
+import { type KimiAdapterOptions, type KimiDetection, detectKimi } from './adapters/kimi/adapter.ts';
 import { redactText } from './redact.ts';
 
 /**
@@ -27,6 +28,7 @@ export interface DetectedRuntimes {
   opencode: Detected<OpenCodeAdapterOptions> & { detection: OpenCodeDetection | null };
   cursor: Detected<CursorAdapterOptions> & { detection: CursorDetection | null };
   grok: Detected<GrokAdapterOptions> & { detection: GrokDetection | null };
+  kimi: Detected<KimiAdapterOptions> & { detection: KimiDetection | null };
 }
 
 export interface DetectOptions {
@@ -42,6 +44,8 @@ export interface DetectOptions {
   cursor?: boolean;
   /** Absent = true. */
   grok?: boolean;
+  /** Absent = true. */
+  kimi?: boolean;
   codexProtocolLog?: string;
   claudeProtocolLog?: string;
   antigravityProtocolLog?: string;
@@ -49,6 +53,7 @@ export interface DetectOptions {
   opencodeProtocolLog?: string;
   cursorProtocolLog?: string;
   grokProtocolLog?: string;
+  kimiProtocolLog?: string;
 }
 
 const notice = (x: Localized): NoticeText => (typeof x === 'string' ? L(x, x) : x);
@@ -68,7 +73,7 @@ async function isolated<T>(name: string, detect: () => Promise<T>): Promise<T> {
 
 export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes> {
   await widenPath().catch(() => {});
-  const [codex, claude, antigravity, dsh, opencode, cursor, grok] = await Promise.all([
+  const [codex, claude, antigravity, dsh, opencode, cursor, grok, kimi] = await Promise.all([
     o.codex ? isolated('codex', () => detectCodex()) : null,
     o.claude ? isolated('claude', () => detectClaude()) : null,
     o.antigravity !== false ? isolated('agy', () => detectAntigravity()) : null,
@@ -76,6 +81,7 @@ export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes
     o.opencode !== false ? isolated('opencode', () => detectOpenCode()) : null,
     o.cursor !== false ? isolated('cursor-agent', () => detectCursor()) : null,
     o.grok !== false ? isolated('grok', () => detectGrok()) : null,
+    o.kimi !== false ? isolated('kimi', () => detectKimi()) : null,
   ]);
   return {
     codex: !codex
@@ -157,6 +163,14 @@ export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes
         : {
             options: { command: grok.command, argsPrefix: grok.argsPrefix, version: grok.version, problem: null, protocolLog: o.grokProtocolLog },
             detection: grok,
+          },
+    kimi: !kimi
+      ? { missing: L('已用 --no-kimi 停用', 'Disabled with --no-kimi'), detection: null }
+      : !kimi.command || kimi.error
+        ? { missing: notice(kimi.error ?? L('未找到 kimi', 'kimi was not found')), detection: kimi }
+        : {
+            options: { command: kimi.command, argsPrefix: kimi.argsPrefix, version: kimi.version, problem: null, protocolLog: o.kimiProtocolLog },
+            detection: kimi,
           },
   };
 }

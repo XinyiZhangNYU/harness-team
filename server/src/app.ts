@@ -12,6 +12,7 @@ import { DshAdapter, type DshAdapterOptions } from './adapters/dsh/adapter.ts';
 import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode/adapter.ts';
 import { CursorAdapter, type CursorAdapterOptions } from './adapters/cursor/adapter.ts';
 import { GrokAdapter, type GrokAdapterOptions } from './adapters/grok/adapter.ts';
+import { KimiAdapter, type KimiAdapterOptions } from './adapters/kimi/adapter.ts';
 import { ClaudeAdapter, type ClaudeAdapterOptions } from './adapters/claude/adapter.ts';
 import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex/adapter.ts';
 import { MockAdapter } from './adapters/mock.ts';
@@ -39,7 +40,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.11.0';
+export const SERVER_VERSION = '0.12.0';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -66,8 +67,10 @@ export interface AppOptions {
   cursor?: CursorAdapterOptions | null;
   /** Register Grok Build through its official ACP runtime (`grok agent stdio`). Omitted = unavailable. */
   grok?: GrokAdapterOptions | null;
+  /** Register Kimi Code through its official ACP runtime (`kimi acp`). Omitted = unavailable. */
+  kimi?: KimiAdapterOptions | null;
   /** Why a real runtime has no adapter at start (shown on its card in the add-member form). */
-  missingRuntimes?: { codex?: NoticeText; claude?: NoticeText; antigravity?: NoticeText; dsh?: NoticeText; opencode?: NoticeText; cursor?: NoticeText; grok?: NoticeText };
+  missingRuntimes?: { codex?: NoticeText; claude?: NoticeText; antigravity?: NoticeText; dsh?: NoticeText; opencode?: NoticeText; cursor?: NoticeText; grok?: NoticeText; kimi?: NoticeText };
   /** Detects the CLIs again (POST /api/runtimes/detect), so installing or logging in needs no restart. */
   detectRuntimes?: () => Promise<DetectedRuntimes>;
   /** Serve the built-in Team MCP to real runtimes (default true). */
@@ -114,7 +117,7 @@ const CreateRoom = z.object({
   projectDir: z.string().max(1000).nullable().optional(),
   agentLanguage: AgentLanguageSchema.optional(),
 });
-const RuntimeKindSchema = z.enum(['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'chat']);
+const RuntimeKindSchema = z.enum(['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'chat']);
 /** Any mode a runtime offers (PERMISSION_MODES); the Core checks it belongs to the member's runtime. */
 const PermissionModeSchema = z.enum([
   'manual',
@@ -134,6 +137,7 @@ const PermissionModeSchema = z.enum([
   'build',
   'agent',
   'ask',
+  'yolo',
 ]);
 const CreateAgent = z.object({
   handle: z.string().max(100).nullable().optional(),
@@ -259,10 +263,11 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
   if (opts.opencode) registry.register(new OpenCodeAdapter(opts.opencode));
   if (opts.cursor) registry.register(new CursorAdapter(opts.cursor));
   if (opts.grok) registry.register(new GrokAdapter(opts.grok));
+  if (opts.kimi) registry.register(new KimiAdapter(opts.kimi));
   const chatProviders = new ChatProviders(db, new KeyFiles(opts.dataDir, opts.secrets ?? null));
   let chatHost: ChatHost | null = null;
   registry.register(new ChatAdapter({ db, providers: chatProviders, dataDir: opts.dataDir, host: () => chatHost, idleMs: opts.chatIdleMs }));
-  for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok'] as const) {
+  for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi'] as const) {
     const why = opts.missingRuntimes?.[kind];
     if (why && !registry.get(kind)) registry.setMissing(kind, why);
   }
@@ -340,6 +345,13 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       registry.setMissing('grok', null);
     } else if (gk instanceof GrokAdapter) gk.update({ problem: found.grok.missing });
     else registry.setMissing('grok', found.grok.missing);
+    const km = registry.get('kimi');
+    if (found.kimi.options) {
+      if (km instanceof KimiAdapter) km.update(found.kimi.options);
+      else registry.register(new KimiAdapter(found.kimi.options));
+      registry.setMissing('kimi', null);
+    } else if (km instanceof KimiAdapter) km.update({ problem: found.kimi.missing });
+    else registry.setMissing('kimi', found.kimi.missing);
     core.runtimesChanged();
     bus.publish({ type: 'runtimes.updated', runtimes: registry.describeAll() });
   }
@@ -562,7 +574,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
         throw new HttpError(
           400,
           L(
-            '创建后不可修改：{fields}（Handle、Runtime、工作目录和模型来源关系到原生会话、计费、Worktree 分支和 @提及）',
+            '创建后不可修改：{fields}（@ 名称、Runtime、工作目录和模型来源关系到原生会话、计费、Worktree 分支和 @提及）',
             'Cannot be changed after creation: {fields} (the handle, runtime, working folder and model source decide the native session, billing, worktree branch and @mentions)',
             { fields: [...fixed] },
           ),

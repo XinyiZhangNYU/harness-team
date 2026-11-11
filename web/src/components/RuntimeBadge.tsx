@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import { avatarDefaultKey, type Agent, type AgentWithStatus, type AvatarDefaultKey, type AvatarDefaults } from '../../../shared/protocol.ts';
+import { avatarDefaultKey, type Agent, type AgentWithStatus, type AvatarDefaultKey, type AvatarDefaults, type RuntimeBilling } from '../../../shared/protocol.ts';
 import { useT } from '../i18n.tsx';
 
 export const RUNTIME_NAME: Record<AgentWithStatus['runtimeKind'], string> = {
@@ -11,6 +11,7 @@ export const RUNTIME_NAME: Record<AgentWithStatus['runtimeKind'], string> = {
   opencode: 'OpenCode',
   cursor: 'Cursor',
   grok: 'Grok',
+  kimi: 'Kimi Code',
   chat: 'Chat',
 };
 
@@ -26,6 +27,7 @@ export function avatarText(runtimeKind: AgentWithStatus['runtimeKind'], displayN
   if (runtimeKind === 'opencode') return 'OC';
   if (runtimeKind === 'cursor') return 'Cu';
   if (runtimeKind === 'grok') return 'Gk';
+  if (runtimeKind === 'kimi') return 'Ki';
   return displayName.slice(0, 1).toUpperCase();
 }
 
@@ -62,15 +64,17 @@ export function AgentAvatar(props: {
 }
 
 /** Always shows the real runtime identity; per-token billing and mock agents are marked. */
-export function RuntimeBadge({ agent }: { agent: AgentWithStatus }) {
+export function RuntimeBadge({ agent, billing }: { agent: AgentWithStatus; billing?: RuntimeBilling | null }) {
   const t = useT();
   if (agent.isMock) return <span className="badge badge-mock">Mock</span>;
   // A member of the removed model-provider route no longer runs.
   const legacy = !!agent.providerId && agent.runtimeKind !== 'chat';
+  // On a message: how the member was billed when it wrote it (older messages did not record it).
+  const metered = (billing !== undefined ? billing : agent.billing) === 'metered_api';
   return (
     <span className={`badge badge-${agent.runtimeKind}${legacy ? ' badge-off' : ''}`} title={agent.workspace ?? undefined}>
       {RUNTIME_NAME[agent.runtimeKind]}
-      {legacy ? ` · ${t('agent.unavailable')}` : agent.billing === 'metered_api' ? ` · ${t('billing.metered')}` : ''}
+      {legacy ? ` · ${t('agent.unavailable')}` : metered ? ` · ${t('billing.metered')}` : ''}
     </span>
   );
 }

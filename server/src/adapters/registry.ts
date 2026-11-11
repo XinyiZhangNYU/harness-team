@@ -75,6 +75,16 @@ const PLANNED: Record<Exclude<RuntimeKind, 'mock'>, RuntimeDescriptor> = {
     requiresWorkspace: true,
     capabilities: NO_CAPABILITIES,
   },
+  kimi: {
+    kind: 'kimi',
+    label: 'Kimi',
+    isMock: false,
+    available: false,
+    installed: false,
+    note: L('未启用：本次启动未注册 Kimi 运行时（未找到 kimi，或使用了 --no-kimi）。', 'Not enabled: no Kimi runtime was registered in this run (kimi was not found, or --no-kimi was used).'),
+    requiresWorkspace: true,
+    capabilities: NO_CAPABILITIES,
+  },
   cursor: {
     kind: 'cursor',
     label: 'Cursor',
@@ -121,7 +131,7 @@ export class AdapterRegistry {
   }
 
   describeAll(): RuntimeDescriptor[] {
-    const kinds: RuntimeKind[] = ['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'chat'];
+    const kinds: RuntimeKind[] = ['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'chat'];
     return kinds.map((k) => {
       const a = this.adapters.get(k);
       if (a) return a.describe();

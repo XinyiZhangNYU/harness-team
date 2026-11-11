@@ -80,7 +80,7 @@ export const MessageItem = memo(function MessageItem(props: {
       <header className="msg-head">
         <span className="msg-sender">{name}</span>
         {sender && <span className="msg-handle">@{sender.handle}</span>}
-        {sender && <RuntimeBadge agent={sender} />}
+        {sender && <RuntimeBadge agent={sender} billing={m.meta?.type === 'chat' || m.meta?.type === 'notice' ? m.meta.billing : undefined} />}
         <span className="msg-time">{time}</span>
         {meta?.phase === 'commentary' && <span className="badge">{t('msg.update')}</span>}
         {meta?.via === 'team_mcp' && <span className="badge">Team MCP</span>}

@@ -227,8 +227,11 @@ export class Core {
    * detection. Null when the runtime cannot run.
    */
   private ownBilling(a: Agent): RuntimeBilling | null {
-    const detected = this.registry.get(a.runtimeKind)?.describe().billing ?? null;
-    return detected ? (a.billingSeen ?? detected) : null;
+    const adapter = this.registry.get(a.runtimeKind);
+    const detected = adapter?.describe().billing ?? null;
+    if (!detected) return null;
+    // A chosen model whose id tells how it is billed (Kimi: the provider) is shown so at once.
+    return (a.model ? adapter?.modelBilling?.(a.model) : null) ?? a.billingSeen ?? detected;
   }
 
   /** The runtime reported how a member's own login is billed: kept, and shown on the member when it changed. */
@@ -676,7 +679,7 @@ export class Core {
     let handle: string;
     if (manual) {
       if (this.store.getAgentByHandle(manual)) {
-        throw new CoreError(409, L('Handle @{handle} 已被其他成员使用（不区分大小写），可改用 @{alt}', 'The handle @{handle} is already used by another member (case-insensitive); you could use @{alt}', { handle: manual, alt: this.allocateHandle(manual, false) }));
+        throw new CoreError(409, L('@ 名称 @{handle} 已被其他成员使用（不区分大小写），可改用 @{alt}', 'The handle @{handle} is already used by another member (case-insensitive); you could use @{alt}', { handle: manual, alt: this.allocateHandle(manual, false) }));
       }
       handle = manual;
     } else {
@@ -700,7 +703,7 @@ export class Core {
       });
     } catch (e) {
       // Another process wrote the same handle between the check and the insert (shared database file).
-      if (/UNIQUE/i.test(errorText(e))) throw new CoreError(409, L('Handle @{handle} 刚被其他成员占用，请重试', 'The handle @{handle} was just taken by another member; try again', { handle }));
+      if (/UNIQUE/i.test(errorText(e))) throw new CoreError(409, L('@ 名称 @{handle} 刚被其他成员占用，请重试', 'The handle @{handle} was just taken by another member; try again', { handle }));
       throw e;
     }
     // Chosen in the add form, after the same warning; the member is in no room yet, so there is no notice to post.
@@ -725,7 +728,7 @@ export class Core {
       if (!HANDLE_PATTERN.test(h) || RESERVED_HANDLES.has(handleKey(h))) continue;
       if (!this.store.getAgentByHandle(h)) return h;
     }
-    throw new CoreError(409, L('无法生成可用的 Handle，请在高级选项中手动指定', 'Could not generate a free handle; set one under advanced options'));
+    throw new CoreError(409, L('无法生成可用的 @ 名称，请手动填写', 'Could not generate a free handle; enter one yourself'));
   }
 
   /** Models and effort levels as the runtime itself reports them (for the create/edit forms). */
@@ -834,7 +837,7 @@ export class Core {
 
   /** Sets (or with null removes) a runtime's default avatar; every window shows it at once. Members' own pictures win. */
   setAvatarDefault(kind: string, avatar: string | null): AvatarDefaults {
-    if (!isAvatarDefaultKey(kind)) throw new CoreError(400, L('只有 Claude Code、Codex、Antigravity、dsh、OpenCode、Cursor、Grok 和模型供应商可以设置默认头像', 'Only Claude Code, Codex, Antigravity, dsh, OpenCode, Cursor, Grok and model providers can have a default avatar'));
+    if (!isAvatarDefaultKey(kind)) throw new CoreError(400, L('只有 Claude Code、Codex、Antigravity、dsh、OpenCode、Cursor、Grok、Kimi 和模型供应商可以设置默认头像', 'Only Claude Code, Codex, Antigravity, dsh, OpenCode, Cursor, Grok, Kimi and model providers can have a default avatar'));
     if (avatar !== null && !isAgentAvatar(avatar)) throw new CoreError(400, L('头像格式不正确', 'Invalid avatar image'));
     this.store.setAvatarDefault(kind, avatar);
     const defaults = this.store.avatarDefaults();
@@ -1535,7 +1538,7 @@ export class Core {
     // Outside a turn there is no chain to attribute the hop to: record it, but do not wake anyone automatically.
     const hop = st.turnHop + 1;
     const targets = this.targetsOf(id.roomId, body, id.agentId);
-    const meta: MessageMeta = { type: 'chat', runtime: agent.runtimeKind, via: 'team_mcp', intent: args.intent ?? 'chat' };
+    const meta: MessageMeta = { type: 'chat', runtime: agent.runtimeKind, via: 'team_mcp', intent: args.intent ?? 'chat', billing: this.ownBilling(agent) };
     const message = this.store.insertMessage({
       roomId: id.roomId,
       kind: 'chat',
@@ -2044,7 +2047,7 @@ export class Core {
       const key = itemId ?? '_';
       let t = texts.get(key);
       if (!t) {
-        const meta: MessageMeta = { type: 'chat', runtime, nativeTurnId, nativeItemId: itemId, phase: phase ?? null };
+        const meta: MessageMeta = { type: 'chat', runtime, nativeTurnId, nativeItemId: itemId, phase: phase ?? null, billing: this.ownBilling(agent) };
         t = { id: claim('chat', meta, '', 'streaming'), stream: new StreamRedactor() };
         texts.set(key, t);
       }
@@ -2235,7 +2238,7 @@ export class Core {
     const done = command ? N('command.done', { name: command.name }) : N('turn.noText');
     if (!slotFilled) {
       const n = result.status === 'failed' ? failedText : result.status === 'completed' ? done : null;
-      update(slot.id, n ? { body: zhText(n), status: finalStatus, meta: { type: 'notice', notice: n } } : { body: '', status: finalStatus });
+      update(slot.id, n ? { body: zhText(n), status: finalStatus, meta: { type: 'notice', notice: n, billing: this.ownBilling(agent) } } : { body: '', status: finalStatus });
     } else if (result.status === 'failed') {
       notice(failedText);
     } else if (command && result.status === 'completed' && !texts.size) {
@@ -2693,10 +2696,10 @@ function checkDisplayName(name: string): string {
 
 /** Manual handle rules, with messages the UI shows as is. */
 function checkHandle(h: string): void {
-  if (handleLength(h) > HANDLE_MAX) throw new CoreError(400, L('Handle 最长 {n} 个字符', 'A handle can have at most {n} characters', { n: HANDLE_MAX }));
-  if (!/^\p{L}/u.test(h)) throw new CoreError(400, L('Handle 必须以文字开头（任何语言的字母或汉字）', 'A handle must start with a letter (in any language)'));
-  if (!HANDLE_PATTERN.test(h)) throw new CoreError(400, L('Handle 只能包含文字、数字、下划线 _ 和连字符 -（不能有空格或标点）', 'A handle may only contain letters, digits, underscores _ and hyphens - (no spaces or punctuation)'));
-  if (RESERVED_HANDLES.has(handleKey(h))) throw new CoreError(400, L('「{h}」是保留名称（用于 @all 等），请换一个 Handle', '“{h}” is reserved (for @all and the like); choose another handle', { h }));
+  if (handleLength(h) > HANDLE_MAX) throw new CoreError(400, L('@ 名称最长 {n} 个字符', 'A handle can have at most {n} characters', { n: HANDLE_MAX }));
+  if (!/^\p{L}/u.test(h)) throw new CoreError(400, L('@ 名称必须以文字开头（任何语言的字母或汉字）', 'A handle must start with a letter (in any language)'));
+  if (!HANDLE_PATTERN.test(h)) throw new CoreError(400, L('@ 名称只能包含文字、数字、下划线 _ 和连字符 -（不能有空格或标点）', 'A handle may only contain letters, digits, underscores _ and hyphens - (no spaces or punctuation)'));
+  if (RESERVED_HANDLES.has(handleKey(h))) throw new CoreError(400, L('「{h}」是保留名称（用于 @all 等），请换一个 @ 名称', '“{h}” is reserved (for @all and the like); choose another handle', { h }));
 }
 
 /**

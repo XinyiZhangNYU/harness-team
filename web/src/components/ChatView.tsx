@@ -191,6 +191,19 @@ export function ChatView(props: {
     return map;
   }, [props.deliveries]);
   const rows = useMemo(() => groupRows(props.messages ?? []), [props.messages]);
+  // Where a message without an @mention goes (as the server routes it): the room's one default responder, else the
+  // member that last posted a chat message. Several default responders: none (a command goes to one member).
+  const defaultMemberId = useMemo(() => {
+    const ids = new Set(props.members.map((a) => a.id));
+    const defaults = props.room.defaultResponders.filter((id) => ids.has(id));
+    if (defaults.length) return defaults.length === 1 ? defaults[0]! : null;
+    const msgs = props.messages ?? [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i]!;
+      if (m.kind === 'chat' && m.senderKind === 'agent' && ids.has(m.senderId)) return m.senderId;
+    }
+    return null;
+  }, [props.room.defaultResponders, props.members, props.messages]);
   const turnChanges = useMemo(() => collectTurnChanges(props.messages ?? []), [props.messages]);
   // The "changed files" summary goes right after the row holding the last message of that member's turn.
   const changesAfter = (ids: Message[]) =>
@@ -400,6 +413,7 @@ export function ChatView(props: {
         members={props.members}
         attachments={attachments}
         runtimes={props.runtimes}
+        defaultMemberId={defaultMemberId}
         onOpenMember={props.onOpenMember}
         onSend={props.onSend}
         onError={props.onError}

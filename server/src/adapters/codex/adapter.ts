@@ -385,8 +385,8 @@ export class CodexAdapter implements RuntimeAdapter {
       installed: true,
       problem,
       note: problem ? L('不可用：{problem}', 'Not available: {problem}', { problem }) : L(
-        '{version} · {login}。沙箱与审批策略沿用你的 Codex 配置；审批人固定为用户（不使用自动审批）。需要确认的请求显示在群聊中，只有你在群内点选才会批准。',
-        '{version} · {login}. Sandbox and approval policy follow your Codex configuration; the approver is always you (no automatic approval). Requests that need confirmation appear in the chat and are approved only when you click there.',
+        '{version} · {login}。沙箱与审批策略沿用你的 Codex 配置；审批人是你，选了「自动审批（auto-review）」权限模式的成员除外（由 Codex 的审核代理决定，结果显示在群聊中）。需要你确认的请求显示在群聊中，只有你在群内点选才会批准。',
+        '{version} · {login}. Sandbox and approval policy follow your Codex configuration; the approver is you, except for members set to the Auto-review permission mode (Codex’s reviewer agent decides; its decisions appear in the chat). Requests that need your confirmation appear in the chat and are approved only when you click there.',
         { version: this.opts.version ?? 'codex', login: this.opts.loginStatus ?? L('登录状态未知', 'login status unknown') },
       ),
       requiresWorkspace: true,

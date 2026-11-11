@@ -71,7 +71,8 @@ function main() {
   let updateTimer = null;
 
   const dataDir = DATA_DIR;
-  const logDir = path.join(app.getPath('userData'), 'logs');
+  // With HT_DATA_DIR (a separate instance's data), its logs stay with that data instead of joining the default ones.
+  const logDir = process.env.HT_DATA_DIR ? path.join(dataDir, 'logs') : path.join(app.getPath('userData'), 'logs');
   const log = openLog(logDir);
 
   // Dialog language: the page's language (Settings → Language) when the window is up, remembered for the next start;
@@ -331,9 +332,28 @@ function main() {
       updateMenu();
     });
     // Windows: the ☰ button (or Alt / F10) opens the application menu below the button (page pixels → window pixels).
+    // Alt+Space opens the Windows window menu while Alt is still down; the page never sees the Space, so releasing Alt
+    // would open this menu on top of it. Windows reports that menu loop (WM_ENTERMENULOOP with wParam FALSE, i.e. not
+    // a TrackPopupMenu menu like ours), and an Alt release during it or just after it closes is ignored.
+    let systemMenuOpen = false;
+    let systemMenuClosedAt = 0;
+    if (process.platform === 'win32') {
+      const WM_ENTERMENULOOP = 0x0211;
+      const WM_EXITMENULOOP = 0x0212;
+      const word = (b) => (Buffer.isBuffer(b) && b.length >= 4 ? b.readUInt32LE(0) : 0);
+      win.hookWindowMessage(WM_ENTERMENULOOP, (wParam) => {
+        if (!word(wParam)) systemMenuOpen = true;
+      });
+      win.hookWindowMessage(WM_EXITMENULOOP, (wParam) => {
+        if (word(wParam) || !systemMenuOpen) return;
+        systemMenuOpen = false;
+        systemMenuClosedAt = Date.now();
+      });
+    }
     ipcMain.removeAllListeners('ht:show-menu');
     ipcMain.on('ht:show-menu', (event, x, y) => {
       if (!fromPage(event)) return;
+      if (systemMenuOpen || Date.now() - systemMenuClosedAt < 400) return;
       const menu = Menu.getApplicationMenu();
       const zoom = win.webContents.getZoomFactor();
       if (menu) menu.popup({ window: win, x: Math.round((Number(x) || 0) * zoom), y: Math.round((Number(y) || 0) * zoom) });
@@ -567,12 +587,20 @@ function main() {
   /** Versions and each harness's detection result, for a bug report; no paths, logins or chat content. */
   async function copyDiagnostics() {
     let runtimes = null;
+    let chatProviders = null;
     try {
       runtimes = (await coreGet('/api/runtimes')).runtimes ?? null;
     } catch {
       // reported as unavailable in the text
     }
-    const text = diagnosticsText({ appVersion: app.getVersion(), packaged: app.isPackaged, os: osName(), versions: process.versions, runtimes });
+    try {
+      // Only how many providers a Chat member can use (as Add member counts them); no names, URLs or keys.
+      const list = (await coreGet('/api/chat-providers')).providers;
+      if (Array.isArray(list)) chatProviders = list.filter((p) => p && p.enabled && !p.legacy && Array.isArray(p.models) && p.models.some((m) => m && m.enabled)).length;
+    } catch {
+      // left out of the text
+    }
+    const text = diagnosticsText({ appVersion: app.getVersion(), packaged: app.isPackaged, os: osName(), versions: process.versions, runtimes, chatProviders });
     clipboard.writeText(text);
     await message({
       type: 'info',
@@ -626,8 +654,8 @@ function main() {
         title: tr('有成员正在工作', 'Members are working'),
         message: tr(`${names.join('、')} 仍在工作或等待中。`, `${names.join(', ')} ${names.length > 1 ? 'are' : 'is'} still working or waiting.`),
         detail: tr(
-          '退出会停止 Harness Team 和它启动的 Claude Code / Codex 进程；未完成的回合在下次启动时标为「已中断」，不会自动重跑。',
-          'Quitting stops Harness Team and the Claude Code / Codex processes it started; unfinished turns are marked “Interrupted” at the next start and are not rerun automatically.',
+          '退出会停止 Harness Team 和它为成员启动的 Harness 进程；未完成的回合在下次启动时标为「已中断」，不会自动重跑。',
+          'Quitting stops Harness Team and the harness processes it started for members; unfinished turns are marked “Interrupted” at the next start and are not rerun automatically.',
         ),
       }).finally(() => {
         questionAbort = null;
@@ -684,7 +712,7 @@ function main() {
   });
 }
 
-/** Core output goes to <userData>/logs/core.log (the launch link with its token is never written). */
+/** Core output goes to <logDir>/core.log (the launch link with its token is never written). */
 function openLog(dir) {
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'core.log');

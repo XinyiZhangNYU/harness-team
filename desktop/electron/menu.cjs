@@ -186,7 +186,7 @@ function menuTemplate({ platform, zh, state, approvals, run, updates = false }) 
  * Plain-text summary for bug reports: versions and what each harness reported. No paths, logins or chat content.
  * @param {{ appVersion: string, packaged: boolean, os: string, versions: Record<string, string | undefined>, runtimes: any[] | null }} o
  */
-function diagnosticsText({ appVersion, packaged, os, versions, runtimes }) {
+function diagnosticsText({ appVersion, packaged, os, versions, runtimes, chatProviders = null }) {
   const lines = [
     `Harness Team ${appVersion}${packaged ? '' : ' (development)'}`,
     `${os}`,
@@ -201,6 +201,9 @@ function diagnosticsText({ appVersion, packaged, os, versions, runtimes }) {
       const parts = [r.available ? 'available' : r.installed === false ? 'not installed' : 'not available'];
       if (r.version) parts.push(String(r.version));
       if (r.billing) parts.push(`billing: ${r.billing}`);
+      // Chat members also need a model provider (Settings → Model providers) before one can be added.
+      if (r.kind === 'chat' && r.available && typeof chatProviders === 'number')
+        parts.push(chatProviders ? `model providers ready: ${chatProviders}` : 'no model provider set up yet, so no Chat member can be added');
       if (!r.available && problem) parts.push(String(problem));
       lines.push(`- ${r.label ?? r.kind}: ${parts.join(', ')}`);
     }

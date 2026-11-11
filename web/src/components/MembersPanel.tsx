@@ -116,7 +116,7 @@ function plainModelId(id: string): string {
 }
 
 const titleCase = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
-const EFFORTS = new Set(['none', 'off', 'on', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+const EFFORTS = new Set(['none', 'off', 'on', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 /** Reasoning effort in the UI language; values this build does not know stay as the runtime reported them. */
 const effortName = (t: TFunc, s: string) =>
   s === 'disabled' ? t('effort.off') : s === 'enabled' ? t('effort.on') : EFFORTS.has(s) ? t(`effort.${s}` as Parameters<TFunc>[0]) : titleCase(s);
@@ -142,6 +142,8 @@ function ModelEffortFields(props: {
   model: string;
   effort: string;
   onChange: (v: { model: string; effort: string }) => void;
+  /** Whether the model that will run (the chosen one, else the runtime's default) is billed per token. */
+  onMetered?: (metered: boolean) => void;
 }) {
   const t = useT();
   const lz = useLocalized();
@@ -172,7 +174,9 @@ function ModelEffortFields(props: {
     : nd?.effort;
   const defaultEffortText = defEffort ? t('common.defaultOf', { value: effortName(t, defEffort) }) : t('common.default');
   const isMock = props.runtimeKind === 'mock';
-  const hosted = (id: string) => (props.runtimeKind === 'opencode' && id.startsWith('opencode/') ? ` · ${t('model.opencodeHosted')}` : '');
+  const metered = (id: string) => models.find((m) => m.id === id)?.billing === 'metered_api';
+  const hosted = (id: string) =>
+    props.runtimeKind === 'opencode' && id.startsWith('opencode/') ? ` · ${t('model.opencodeHosted')}` : metered(id) ? ` · ${t('billing.metered')}` : '';
   const modelOption = (m: (typeof models)[number]) => (
     <option key={m.id} value={m.id} title={lz(m.description) || m.resolvedModel || undefined}>
       {m.displayName}
@@ -180,6 +184,9 @@ function ModelEffortFields(props: {
       {hosted(m.id)}
     </option>
   );
+  const runsMetered = metered(props.model || (nd?.model ?? ''));
+  useEffect(() => props.onMetered?.(runsMetered), [runsMetered]);
+  useEffect(() => () => props.onMetered?.(false), []);
   const groups = groupModels(props.runtimeKind, models);
   const defModel = nd?.model ? `${knownModel(props.runtimeKind, nd.model)?.displayName ?? nd.model}${hosted(nd.model)}` : null;
 
@@ -257,7 +264,7 @@ function PermissionField(props: {
   // A saved mode this build does not offer (cannot normally happen) stays visible instead of silently changing.
   const unknown = props.value && !modes.includes(props.value as PermissionMode);
   const help = props.value
-    ? ((props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' ? `permHelp.${props.runtimeKind}.${props.value}` : `permHelp.${props.value}`) as Parameters<TFunc>[0])
+    ? ((props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' || props.runtimeKind === 'kimi' ? `permHelp.${props.runtimeKind}.${props.value}` : `permHelp.${props.value}`) as Parameters<TFunc>[0])
     : 'permHelp.follow';
   return (
     <div className="field">
@@ -449,6 +456,21 @@ function handleProblem(h: string, t: TFunc): string | null {
   if (!HANDLE_PATTERN.test(h)) return t('handle.chars');
   if (RESERVED_HANDLES.has(handleKey(h))) return t('handle.reserved', { handle: h });
   return null;
+}
+
+/** A path compared as a folder: no trailing separator; Windows paths (drive letter or backslash) case-insensitively. */
+function folderKey(p: string): string {
+  const windows = /^[A-Za-z]:|\\/.test(p);
+  const s = (windows ? p.replace(/\//g, '\\') : p).replace(/[\\/]+$/, '');
+  return windows ? s.toLowerCase() : s;
+}
+
+/** A member's working folder that is neither the chat's project folder nor inside it. */
+function outsideFolder(workspace: string, projectDir: string | null): boolean {
+  if (!projectDir) return false;
+  const w = folderKey(workspace);
+  const d = folderKey(projectDir);
+  return w !== d && !w.startsWith(d + '\\') && !w.startsWith(d + '/');
 }
 
 /** Mock is a developer tool: offered for new members only in dev builds (existing Mock members keep working). */
@@ -1141,7 +1163,7 @@ function AddMemberDialog(props: {
                       {a.displayName} <span className="member-handle">@{a.handle}</span> <RuntimeBadge agent={a} />
                     </span>
                     {a.workspace && (
-                      <span className="choice-sub mono" title={a.workspace}>
+                      <span className={`choice-sub mono${outsideFolder(a.workspace, props.room.projectDir) ? ' warn-text' : ''}`} title={a.workspace}>
                         {a.workspace}
                       </span>
                     )}
@@ -1241,11 +1263,22 @@ function NewAgentForm(props: {
   const [handle, setHandle] = useState('');
   const [suggested, setSuggested] = useState('');
   const [error, setError] = useState<string | null>(null);
+  // A failed create shows its error at the end of a long form: bring it into view; a taken @ name also focuses that field.
+  const errorRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<HTMLInputElement>(null);
+  const [handleFault, setHandleFault] = useState(false);
+  useEffect(() => {
+    if (!error) return;
+    errorRef.current?.scrollIntoView({ block: 'nearest' });
+    if (handleFault) handleRef.current?.focus();
+  }, [error]);
   const runtime = props.runtimes.find((r) => r.kind === runtimeKind);
   const isChat = runtimeKind === 'chat';
   const needsWorkspace = runtime?.requiresWorkspace ?? false;
   // The harness's own login bills per token (API key, cloud provider): allowed as in a terminal, with a note.
-  const ownMetered = runtime?.available === true && runtime.billing === 'metered_api';
+  // A model of the runtime's own login that bills per token (Kimi: an API-key provider) counts as well.
+  const [modelMetered, setModelMetered] = useState(false);
+  const ownMetered = runtime?.available === true && (runtime.billing === 'metered_api' || (!isChat && modelMetered));
   const handleErr = handleProblem(handle.trim(), t);
   const sameName = props.existingNames.find((x) => x.name.trim().toLowerCase() === displayName.trim().toLowerCase());
   const blocked =
@@ -1324,7 +1357,7 @@ function NewAgentForm(props: {
                 </label>,
               ]
             : [
-                <label key={r.kind} className={`choice${runtimeKind === r.kind ? ' on' : ''}${runtimeUsable(r) ? '' : ' disabled'}`} title={lz(r.problem ?? r.note) || undefined}>
+                <label key={r.kind} className={`choice${runtimeKind === r.kind ? ' on' : ''}${runtimeUsable(r) ? '' : ' disabled'}`} title={(r.kind === 'chat' && r.available ? t('add.chatNoProviderTip') : lz(r.problem ?? r.note)) || undefined}>
                   <input
                     type="radio"
                     name="runtime"
@@ -1368,7 +1401,10 @@ function NewAgentForm(props: {
       noValidate
       onSubmit={async (e) => {
         e.preventDefault();
-        if (handleErr) return setError(handleErr);
+        if (handleErr) {
+          setHandleFault(true);
+          return setError(handleErr);
+        }
         if (blocked) return;
         props.onBusy(true);
         setError(null);
@@ -1396,6 +1432,7 @@ function NewAgentForm(props: {
           await api.addMember(props.room.id, agent.id, props.defaultReply);
           props.onAdded(agent);
         } catch (err) {
+          setHandleFault(err instanceof ApiError && err.status === 409 && !!handle.trim() && err.message.includes(`@${handle.trim().replace(/^@/, '').normalize('NFKC')}`));
           setError(errorText(err));
           props.onBusy(false);
         }
@@ -1424,6 +1461,7 @@ function NewAgentForm(props: {
           <span>@</span>
           <input
             id="agent-handle"
+            ref={handleRef}
             value={handle}
             maxLength={40}
             placeholder={suggested}
@@ -1451,7 +1489,7 @@ function NewAgentForm(props: {
         </>
       ) : !runtime?.isMock && (
         <>
-          <ModelEffortFields runtimeKind={runtimeKind} generation={detected} model={cfg.model} effort={cfg.effort} onChange={setCfg} />
+          <ModelEffortFields runtimeKind={runtimeKind} generation={detected} model={cfg.model} effort={cfg.effort} onChange={setCfg} onMetered={setModelMetered} />
           <PermissionField
             runtimeKind={runtimeKind}
             generation={detected}
@@ -1479,7 +1517,11 @@ function NewAgentForm(props: {
           {isChat ? t('add.meteredChat') : runtimeKind === 'opencode' ? t('add.meteredOpenCode') : t('add.meteredOwn', { runtime: runtime!.label })}
         </div>
       )}
-      {error && <div className="error-text">{error}</div>}
+      {error && (
+        <div className="error-text" ref={errorRef}>
+          {error}
+        </div>
+      )}
     </form>
   );
 }

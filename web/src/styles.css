@@ -284,7 +284,7 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
   position: fixed; z-index: 120; width: max-content; max-width: min(300px, calc(100vw - 16px)); overflow: auto; pointer-events: none;
   padding: 8px 10px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface);
   box-shadow: var(--shadow); color: var(--text); font-size: 12.5px; font-weight: 400; line-height: 1.55;
-  white-space: normal; text-align: left; letter-spacing: normal; text-transform: none; cursor: default;
+  white-space: pre-line; text-align: left; letter-spacing: normal; text-transform: none; cursor: default;
 }
 .avatar-mock { background: var(--warn-soft); color: var(--warn); }
 
@@ -614,6 +614,7 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
 .choice-main { display: flex; flex-direction: column; min-width: 0; }
 .choice-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; }
 .choice-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.choice-sub.warn-text { color: var(--warn); }
 .pick-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .pick-row { position: relative; }
 .pick-row .choice { padding-right: 44px; }

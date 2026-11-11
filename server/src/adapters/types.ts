@@ -34,6 +34,11 @@ export interface RuntimeAdapter {
    */
   listModels?(opts?: { refresh?: boolean; cwd?: string | null }): Promise<RuntimeModelCatalog>;
   /**
+   * How a model of the own login is billed when the model id itself tells (e.g. a provider prefix), else null (the
+   * runtime's billing applies). A member with that model chosen is shown so before its first turn.
+   */
+  modelBilling?(model: string | null): RuntimeBilling | null;
+  /**
    * Working directories the user already used with this runtime outside Harness Team, newest first, as reported by
    * the runtime itself. Must not make a model request. Absent = the runtime has no such listing.
    */

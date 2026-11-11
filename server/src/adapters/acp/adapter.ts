@@ -110,6 +110,8 @@ function selectOptions(o: ConfigOption | undefined): SelectOption[] {
 }
 
 const byCategory = (opts: ConfigOption[], category: string) => opts.find((o) => o.category === category && (o.type ?? 'select') === 'select');
+/** The `billing` field of a model option, only when the model's id tells. */
+const withBilling = (b: RuntimeBilling | null): { billing?: RuntimeBilling } => (b ? { billing: b } : {});
 const current = (o: ConfigOption | undefined): string | null => (o && typeof o.currentValue === 'string' ? o.currentValue : null);
 
 type ConfigKind = 'model' | 'effort' | 'mode';
@@ -199,6 +201,10 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
   abstract get permissionModes(): readonly PermissionMode[];
   /** Billing as far as the environment tells. */
   protected abstract billing(): RuntimeBilling;
+  /** How a model is billed when its id tells (Kimi: the provider prefix); null = `billing()` applies. */
+  modelBilling(_model: string | null): RuntimeBilling | null {
+    return null;
+  }
   /** RuntimeDescriptor.note for an available runtime. */
   protected abstract availableNote(version: string | null): Localized;
   /** Arguments that start the ACP server when the options give none. */
@@ -312,6 +318,16 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
     return isAuthError(e);
   }
 
+  /** A runtime error with a notice of its own (checked before `isNotLoggedIn`), e.g. a plan without access. */
+  knownError(_e: unknown): NoticeText | null {
+    return null;
+  }
+
+  /** The notice for an account error: `knownError`, else `notLoggedIn` when it means not logged in. */
+  accountNotice(e: unknown): NoticeText | null {
+    return this.knownError(e) ?? (this.isNotLoggedIn(e) ? this.notLoggedIn : null);
+  }
+
   /** Runtime-specific arguments after the ones that start the server. */
   protected extraArgs(_withHttpMcp: boolean): string[] {
     return [];
@@ -322,6 +338,23 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
    * "method not found").
    */
   extensionRequest(_method: string, _params: any): ExtensionReply | null {
+    return null;
+  }
+
+  /**
+   * A session/request_permission that is not an ordinary tool approval (a question to the user, a plan review with
+   * the runtime's own answers): how it is answered instead of the generic approval card. null = the generic card.
+   */
+  permissionRequest(_params: any): ExtensionReply | null {
+    return null;
+  }
+
+  /**
+   * Called just before a prompt is sent. A runtime that ends a failed turn like a finished one (Kimi answers a failed
+   * model request with `end_turn` and no error) returns a check that runs when the prompt ends with `end_turn`: why
+   * the turn failed, or null when it did not.
+   */
+  silentFailureCheck(_sessionId: string): (() => Promise<NoticeText | null>) | null {
     return null;
   }
 
@@ -354,7 +387,7 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
     s.processMode = this.isProcessMode(args.agent.permissionMode) ? args.agent.permissionMode : null;
     if (args.language) s.language = args.language;
     if (args.resumeNativeSessionId) s.restoreState(args.adapterState);
-    s.hooks = { saveState: args.onAdapterState, lateUsage: args.onLateUsage };
+    s.hooks = { saveState: args.onAdapterState, lateUsage: args.onLateUsage, billing: args.billing, onBilling: args.onBilling };
     try {
       await s.connect(args.resumeNativeSessionId);
     } catch (e) {
@@ -423,7 +456,7 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
       ]);
       return probe.catalogFromSession() ?? fail(this.t('{name} 没有报告可选的模型', '{name} reported no model choice'));
     } catch (e) {
-      return fail(e instanceof NoticeError ? e.notice : this.isNotLoggedIn(e) ? this.notLoggedIn : this.t('无法读取 {name} 模型目录：{error}', 'Could not read the {name} model list: {error}', { error: errText(e) }));
+      return fail(e instanceof NoticeError ? e.notice : this.accountNotice(e) ?? this.t('无法读取 {name} 模型目录：{error}', 'Could not read the {name} model list: {error}', { error: errText(e) }));
     } finally {
       if (timer) clearTimeout(timer);
       await probe.close();
@@ -487,7 +520,12 @@ export class AcpSession implements AgentSession {
     cost: number | null;
   } | null = null;
   /** The Core's callbacks: save the adapter state (before an option request goes out), and a cost that came late. */
-  hooks: { saveState?: (nativeSessionId: string, state: string | null) => void; lateUsage?: (usage: TurnUsage) => void } = {};
+  hooks: {
+    saveState?: (nativeSessionId: string, state: string | null) => void;
+    lateUsage?: (usage: TurnUsage) => void;
+    billing?: () => RuntimeBilling | null;
+    onBilling?: (billing: RuntimeBilling) => void;
+  } = {};
   /** The member's chosen session mode for the current turn (null = follow the runtime's own setting). */
   private wantMode: string | null = null;
   /** The member's mode that this session's process was started in (see AcpAdapter.isProcessMode), else null. */
@@ -525,10 +563,6 @@ export class AcpSession implements AgentSession {
 
   private t(zh: string, en: string, params?: Record<string, NoticeValue | null | undefined>): NoticeText {
     return this.adapter.t(zh, en, params);
-  }
-
-  private get notLoggedIn(): NoticeText {
-    return this.adapter.notLoggedIn;
   }
 
   get effective(): EffectiveModel | null {
@@ -648,7 +682,8 @@ export class AcpSession implements AgentSession {
       }
     } catch (e) {
       if (e instanceof ResumeFailedError || e instanceof NoticeError) throw e;
-      if (this.adapter.isNotLoggedIn(e)) throw new NoticeError(this.notLoggedIn);
+      const account = this.adapter.accountNotice(e);
+      if (account) throw new NoticeError(account);
       throw new NoticeError(this.t('无法打开 {name} 会话：{error}', 'Could not open the {name} session: {error}', { error: errText(e) }));
     }
     // The runtime reported (some of) its options as they are now.
@@ -675,7 +710,8 @@ export class AcpSession implements AgentSession {
   /** Exact session by id: `session/resume` when offered, else `session/load` (its history replay is ignored). */
   private async resume(rpc: JsonRpcProcess, id: string, mcpServers: unknown[], timeoutMs: number): Promise<any> {
     const fail = (e: unknown) => {
-      if (this.adapter.isNotLoggedIn(e)) return new NoticeError(this.notLoggedIn);
+      const account = this.adapter.accountNotice(e);
+      if (account) return new NoticeError(account);
       const msg = errText(e);
       return new ResumeFailedError(`${this.adapter.label} session ${id} could not be resumed: ${msg}`, /not found|unknown session|no such/i.test(msg) ? 'missing' : 'other', msg);
     };
@@ -766,6 +802,7 @@ export class AcpSession implements AgentSession {
         efforts,
         defaultEffort: effort,
         isDefault: o.value === def,
+        ...withBilling(this.adapter.modelBilling(o.value)),
       }));
     } else if (this.models?.availableModels?.length) {
       def = this.models.currentModelId ?? null;
@@ -777,6 +814,7 @@ export class AcpSession implements AgentSession {
         efforts,
         defaultEffort: effort,
         isDefault: m.modelId === def,
+        ...withBilling(this.adapter.modelBilling(m.modelId)),
       }));
     } else return null;
     return {
@@ -820,6 +858,25 @@ export class AcpSession implements AgentSession {
    * confirms only its own option. Unassociated reports never transfer ownership, and ambiguous baselines block
    * "follow" before any restoration. An explicit choice can confirm a value without erasing that ambiguity.
    */
+  /**
+   * The model the session will run on, when its id tells how it is billed, is reported to the Core. A member shown on
+   * the subscription whose model bills per token (e.g. the runtime's own default changed to an API-key provider) is
+   * stopped before the prompt; it is then marked per-token, so sending again is the user's own choice.
+   */
+  private checkModelBilling(): Localized | null {
+    const model = this.effective?.model ?? null;
+    const actual = this.adapter.modelBilling(model);
+    if (!actual) return null;
+    const shown = this.hooks.billing ? this.hooks.billing() : null;
+    this.hooks.onBilling?.(actual);
+    if (shown !== 'subscription' || actual !== 'metered_api') return null;
+    return this.t(
+      '{name} 这一回合会用模型 {model}，它按 token 计费，但该成员显示的是会员额度，本消息未发送。该成员现在标为按量计费：再发一次消息就按 token 计费运行；想用会员额度，请在成员设置里选会员模型。Harness Team 不会自行切换计费方式。',
+      '{name} would run this turn on the model {model}, which is billed per token, but this member shows the membership quota, so the message was not sent. The member is now marked as billed per token: send the message again to run it per token, or pick a membership model in the member settings. Harness Team never switches billing on its own.',
+      { model },
+    );
+  }
+
   private async applyConfig(input: TurnInput, sink: TurnEventSink): Promise<Localized | null> {
     const rpc = this.rpc!;
     const cfg = input.config ?? { model: null, effort: null, permissionMode: null };
@@ -1234,6 +1291,8 @@ export class AcpSession implements AgentSession {
       if (signal.aborted) return { status: 'interrupted' };
       const configError = await this.applyConfig(input, sink);
       if (configError) return { status: 'failed', error: configError };
+      const billingError = this.checkModelBilling();
+      if (billingError) return { status: 'failed', error: billingError };
       // Stopped while the session was prepared: the prompt is not sent.
       if (signal.aborted) return { status: 'interrupted' };
       if (this.permission) sink({ type: 'permission.effective', permission: this.permission });
@@ -1367,23 +1426,39 @@ export class AcpSession implements AgentSession {
   private onServerRequest(rpc: JsonRpcProcess, id: RpcId, method: string, p: any) {
     // The current turn handles its own failures (onPermission never throws); only answering a process that is going
     // away can fail here, and that process is not waited for.
-    if (method === 'session/request_permission') {
-      if (rpc === this.rpc && p?.sessionId === this.nativeSessionId && this.turn && this.turn.onPermission(id, p)) return;
-      // No turn of ours is running on this process (or the process is being closed): nothing may be approved.
-      try {
-        rpc.respond(id, { outcome: { outcome: 'cancelled' } });
-      } catch {}
-      return;
-    }
+    const own = rpc === this.rpc && p?.sessionId === this.nativeSessionId;
     let ext: ExtensionReply | null = null;
-    try {
-      ext = this.adapter.extensionRequest(method, p);
-    } catch {
-      ext = null;
+    if (method === 'session/request_permission') {
+      try {
+        ext = this.adapter.permissionRequest(p);
+      } catch {
+        ext = null;
+      }
+      if (!ext) {
+        if (own && this.turn && this.turn.onPermission(id, p)) return;
+        // No turn of ours is running on this process (or the process is being closed): nothing may be approved.
+        try {
+          rpc.respond(id, { outcome: { outcome: 'cancelled' } });
+        } catch {}
+        return;
+      }
+      if (ext.kind === 'answer' && !(own && this.turn)) {
+        try {
+          rpc.respond(id, { outcome: { outcome: 'cancelled' } });
+        } catch {}
+        return;
+      }
+    } else {
+      try {
+        ext = this.adapter.extensionRequest(method, p);
+      } catch {
+        ext = null;
+      }
     }
     if (ext?.kind === 'approval') {
       // Shown only for the turn running on this process; otherwise nothing may be accepted.
-      if (rpc === this.rpc && this.turn && this.turn.onExtensionApproval(id, method, ext)) return;
+      const here = method === 'session/request_permission' ? own : rpc === this.rpc;
+      if (here && this.turn && this.turn.onExtensionApproval(id, method, ext)) return;
       try {
         rpc.respond(id, ext.answer('cancelled'));
       } catch {}
@@ -1488,19 +1563,16 @@ class AcpTurn {
     return this.rt.t(zh, en, params);
   }
 
-  private get notLoggedIn(): NoticeText {
-    return this.rt.notLoggedIn;
-  }
-
   async run(prompt: unknown[]): Promise<TurnResult> {
     if (this.signal.aborted) return { status: 'interrupted' };
     const onAbort = () => this.cancel();
     this.signal.addEventListener('abort', onAbort, { once: true });
     try {
       this.emit({ type: 'turn.started', nativeTurnId: this.turnId });
+      const silentFailure = this.rt.silentFailureCheck(this.sessionId);
       this.rpc
         .request<any>('session/prompt', { sessionId: this.sessionId, prompt }, 0)
-        .then((res) => {
+        .then(async (res) => {
           this.markNativeEnded();
           this.flushText();
           const stop = String(res?.stopReason ?? '');
@@ -1508,6 +1580,10 @@ class AcpTurn {
           if (this.failure) return this.end({ status: 'failed', error: this.failure, usage });
           if (stop === 'cancelled') return this.end({ status: 'interrupted', usage });
           if (stop === 'refusal') return this.end({ status: 'failed', error: this.t('{name} 拒绝继续（refusal）', '{name} refused to continue (refusal)'), usage });
+          if (stop === 'end_turn' && silentFailure) {
+            const failed = await silentFailure().catch(() => null);
+            if (failed) return this.end({ status: 'failed', error: failed, usage });
+          }
           if (stop === 'max_tokens' || stop === 'max_turn_requests') {
             this.emit(noticeEvent(this.t('{name} 因 {reason} 结束了本回合', '{name} ended this turn because of {reason}', { reason: stop })));
           }
@@ -1517,7 +1593,7 @@ class AcpTurn {
           this.markNativeEnded();
           this.flushText();
           if (this.failure) return this.end({ status: 'failed', error: this.failure });
-          this.end({ status: 'failed', error: this.rt.isNotLoggedIn(e) ? this.notLoggedIn : this.t('session/prompt 失败：{error}', 'session/prompt failed: {error}', { error: errText(e) }) });
+          this.end({ status: 'failed', error: this.rt.accountNotice(e) ?? this.t('session/prompt 失败：{error}', 'session/prompt failed: {error}', { error: errText(e) }) });
         });
       return await this.done;
     } finally {

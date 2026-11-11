@@ -50,6 +50,7 @@ const MEMBER_NAME: Record<RuntimeDescriptor['kind'], string> = {
   opencode: 'OpenCode',
   cursor: 'Cursor',
   grok: 'Grok',
+  kimi: 'Kimi',
   chat: 'Chat',
 };
 

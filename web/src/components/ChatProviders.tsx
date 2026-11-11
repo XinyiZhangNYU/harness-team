@@ -19,6 +19,7 @@ import { api } from '../api.ts';
 import { useLocalized, useT, type TFunc } from '../i18n.tsx';
 import { compactNumber } from '../format.ts';
 import { Dialog, errorText } from './Dialog.tsx';
+import { HelpTip } from './HelpTip.tsx';
 import { Icon } from './Icon.tsx';
 
 // ---- shared state ----
@@ -63,7 +64,7 @@ const FORMAT_NAME: Record<ChatApiFormat, string> = {
   gemini: 'Gemini',
 };
 
-const EFFORTS = new Set(['none', 'off', 'on', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+const EFFORTS = new Set(['none', 'off', 'on', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 export const reasoningName = (t: TFunc, s: string) =>
   s === 'disabled' || s === 'none' ? t('effort.off') : s === 'enabled' ? t('effort.on') : EFFORTS.has(s) ? t(`effort.${s}` as Parameters<TFunc>[0]) : s;
 
@@ -343,7 +344,9 @@ function ProviderForm(props: {
           </div>
         )}
         <div className="field">
-          <span className="field-label">API Key</span>
+          <span className="field-label">
+            API Key <HelpTip text={t('cp.keyHelp')} />
+          </span>
           <div className="key-kinds" role="radiogroup" aria-label="API Key">
             {keyKinds.map((k) => {
               const off = k === 'app' && !props.data.appKeys;

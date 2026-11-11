@@ -6,6 +6,7 @@ import type { AttachmentDrafts } from '../attachments.ts';
 import { DraftStrip } from './Attachments.tsx';
 import { useLocalized, useT } from '../i18n.tsx';
 import { Icon } from './Icon.tsx';
+import { configSummary } from './MembersPanel.tsx';
 
 /** Finds an "@prefix" token that ends at the caret. */
 function mentionQuery(text: string, caret: number): { start: number; query: string } | null {
@@ -16,9 +17,15 @@ function mentionQuery(text: string, caret: number): { start: number; query: stri
 }
 
 /** "@handle /partial" from the start of the message to the caret: that member's slash commands are offered. */
-function commandQuery(text: string, caret: number): { handle: string; start: number; query: string } | null {
+function commandQuery(text: string, caret: number): { handle: string; start: number; query: string; implicit?: boolean } | null {
   const m = /^(\s*@([^\s@]+)\s+)\/([\w:-]*)$/.exec(text.slice(0, caret));
   return m ? { handle: m[2]!, start: m[1]!.length, query: m[3]!.toLowerCase() } : null;
+}
+
+/** "/partial" with no member before it: the commands of the member an unaddressed message goes to. */
+function implicitCommandQuery(text: string, caret: number, handle: string): { handle: string; start: number; query: string; implicit: true } | null {
+  const m = /^(\s*)\/([\w:-]*)$/.exec(text.slice(0, caret));
+  return m ? { handle, start: m[1]!.length, query: m[2]!.toLowerCase(), implicit: true } : null;
 }
 
 /** A "/name" with no member mentioned before it (commands always go to one member). */
@@ -55,6 +62,8 @@ export function Composer(props: {
   attachments: AttachmentDrafts;
   /** The members' runtimes, for the slash commands each offers. */
   runtimes: RuntimeDescriptor[];
+  /** The one member a message without an @mention goes to (a "/command" typed alone goes there too). */
+  defaultMemberId?: string | null;
   /** Opens a member's settings (where /model and /effort are changed). */
   onOpenMember?: (agentId: string) => void;
   onSend: (body: string, clientMessageId: string, attachmentIds: string[]) => Promise<void>;
@@ -172,7 +181,8 @@ export function Composer(props: {
   const memberByHandle = (handle: string) => props.members.find((a) => handleKey(a.handle) === handleKey(handle));
   const commandsOf = (a: AgentWithStatus | undefined): RuntimeCommand[] =>
     (a && props.runtimes.find((r) => r.kind === a.runtimeKind)?.capabilities.commands) || [];
-  const cmd = mention || listOff ? null : commandQuery(text, caret);
+  const fallback = props.members.find((a) => a.id === props.defaultMemberId);
+  const cmd = mention || listOff ? null : (commandQuery(text, caret) ?? (fallback ? implicitCommandQuery(text, caret, fallback.handle) : null));
   const cmdAgent = cmd ? memberByHandle(cmd.handle) : undefined;
 
   // The member's skills are listed by its own runtime (on demand, when "@member /" is typed).
@@ -187,7 +197,7 @@ export function Composer(props: {
   const skills = cmd && cmdAgent ? matchCommands(listed?.data?.skills ?? [], cmd.query) : [];
   const commands = [...builtins, ...skills];
   // Only the composer's own text decides: a bare "/name" gets a hint instead of being sent as chat.
-  const bare = !mention && !cmd && BARE_COMMAND.test(text.slice(0, caret)) && !text.slice(0, caret).includes('\n');
+  const bare = !fallback && !mention && !cmd && BARE_COMMAND.test(text.slice(0, caret)) && !text.slice(0, caret).includes('\n');
   const listLength = suggestions.length || commands.length;
   // A list is shown (the command list also when nothing matches); Esc closes it.
   const menuOpen = suggestions.length > 0 || !!(cmd && cmdAgent);
@@ -225,7 +235,7 @@ export function Composer(props: {
       props.onOpenMember?.(cmdAgent.id);
       return;
     }
-    const insert = `/${c.name}${c.args || c.action === 'skill' ? ' ' : ''}`;
+    const insert = `${cmd.implicit ? `@${cmdAgent.handle} ` : ''}/${c.name}${c.args || c.action === 'skill' ? ' ' : ''}`;
     moveCaret(text.slice(0, cmd.start) + insert + text.slice(caret), cmd.start + insert.length);
   };
 
@@ -242,7 +252,8 @@ export function Composer(props: {
     const typed = text.trim();
     if (!canSend) return;
     const sentQuotes = quotes;
-    const body = withQuotes(quoted, typed);
+    // A "/command" typed alone goes to the member an unaddressed message goes to.
+    const body = withQuotes(quoted, !quoted.length && fallback && BARE_COMMAND.test(typed) ? `@${fallback.handle} ${typed}` : typed);
     // Commands are only what the composer holds alone; with quotes it is a message.
     if (!quoted.length && BARE_COMMAND.test(body)) {
       props.onError(new Error(t('composer.commandHint')));
@@ -389,7 +400,9 @@ export function Composer(props: {
       {cmd && cmdAgent && (
         <div ref={listRef} className="mention-list command-list">
           <div className="list-head">
-            <span aria-hidden="true">{t('composer.commands', { handle: cmdAgent.handle })}</span>
+            <span aria-hidden="true">
+              {cmd.implicit ? t('composer.commandsDefault', { handle: cmdAgent.handle, model: configSummary(cmdAgent, t) }) : t('composer.commands', { handle: cmdAgent.handle })}
+            </span>
             {/* Stays a button while reading, so a keyboard user keeps the focus on it. */}
             <button
               type="button"

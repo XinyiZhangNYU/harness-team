@@ -101,6 +101,9 @@ const T = {
   'perm.agent': { zh: 'Agent（agent）', en: 'Agent (agent)' },
   'perm.ask': { zh: '只问答（ask）', en: 'Ask only (ask)' },
   'perm.accept-edits': { zh: '自动接受编辑（accept-edits）', en: 'Accept edits (accept-edits)' },
+  'perm.kimi.default': { zh: '默认，每次确认（default）', en: 'Default, ask every time (default)' },
+  'perm.kimi.auto': { zh: '自动批准安全操作（auto）', en: 'Auto-approve safe actions (auto)' },
+  'perm.yolo': { zh: '全部自动批准（yolo）', en: 'Approve everything (yolo)' },
   'perm.skip-permissions': { zh: '跳过所有审批（--dangerously-skip-permissions）', en: 'Skip all approvals (--dangerously-skip-permissions)' },
   'agent.applyAfterTurn': {
     zh: '当前回合不受影响（不会中断回合或工具），将从本回合结束后的下一回合起生效',
