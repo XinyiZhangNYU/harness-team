@@ -33,6 +33,10 @@ contextBridge.exposeInMainWorld('harnessDesktop', {
   showMenu: (x, y) => ipcRenderer.send('ht:show-menu', Number(x) || 0, Number(y) || 0),
   /** Colors of the window buttons drawn over the title bar, as #rrggbb. */
   setTitleBarColors: (color, symbolColor) => ipcRenderer.send('ht:title-bar-colors', String(color), String(symbolColor)),
+  /** Settings → keep the computer awake while members work: the saved choice (off by default). */
+  getKeepAwake: () => ipcRenderer.invoke('ht:keep-awake-get'),
+  /** @param {boolean} on @returns {Promise<boolean | null>} the choice now in effect */
+  setKeepAwake: (on) => ipcRenderer.invoke('ht:keep-awake-set', on === true),
   /** In-app update state (null where the shell does not update itself). */
   getUpdate: () => ipcRenderer.invoke('ht:update-get'),
   /** @param {(state: object) => void} listener @returns {() => void} */

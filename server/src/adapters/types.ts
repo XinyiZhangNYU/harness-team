@@ -4,7 +4,9 @@ import type {
   ActivityKind,
   Agent,
   AgentLanguage,
+  ApprovalAnswers,
   ApprovalDecision,
+  ApprovalForm,
   PermissionMode,
   RuntimeBilling,
   RuntimeDescriptor,
@@ -148,6 +150,8 @@ export interface ModelConfig {
   effort: string | null;
   /** One of PERMISSION_MODES for the runtime; null/absent = follow the user's own configuration (nothing is sent). */
   permissionMode?: PermissionMode | null;
+  /** Claude Code only: start with `--chrome` (Claude in Chrome). Absent = off. */
+  chrome?: boolean;
 }
 
 /** The permission mode the runtime itself reported (AgentPermissionReport without the timestamp). */
@@ -189,7 +193,13 @@ export interface AgentSession {
    * Only called by the Core for a decision the local user made in the group chat. Returns an error string (and sends
    * nothing) when the request is no longer pending in the current turn or the decision is not offered for it.
    */
-  respondApproval?(nativeRequestId: string, decision: ApprovalDecision): ApprovalAnswer;
+  respondApproval?(nativeRequestId: string, decision: ApprovalDecision, answers?: ApprovalAnswers): ApprovalAnswer;
+  /**
+   * Adds a message from the local user to the turn that is running now (capabilities.steer). Resolves `ok` once the
+   * runtime took it into that turn; otherwise (no turn running, the turn ends first, or the runtime refused) nothing
+   * was sent and the Core queues the message for the next turn.
+   */
+  steer?(input: SteerInput): Promise<SteerAnswer>;
   /**
    * State this adapter needs again when the same native session is resumed by a later process (saved by the Core with
    * the binding after opening and after each turn, passed back as OpenSessionArgs.adapterState). Null = nothing.
@@ -198,7 +208,17 @@ export interface AgentSession {
   close(): Promise<void>;
 }
 
-export type ApprovalAnswer = { ok: true; nativeDecision: string } | { ok: false; error: Localized };
+export interface SteerInput {
+  /** The added message with its source label (buildSteerText). */
+  text: string;
+  messageId: string;
+  /** Images and files of that message, as for TurnInput.attachments. */
+  attachments?: TurnAttachment[];
+}
+
+export type SteerAnswer = { ok: true } | { ok: false; error: Localized };
+
+export type ApprovalAnswer ={ ok: true; nativeDecision: string } | { ok: false; error: Localized };
 
 /** Answers shared by the runtimes when a decision cannot be sent. */
 export const REQUEST_GONE = L('该原生请求已不在等待状态（已结束、已取消或已被处理）', 'The native request is no longer waiting (it ended, was cancelled or was already handled)');
@@ -302,6 +322,8 @@ export type TurnEvent =
       prefix?: string | null;
       /** With `allow_session`: what it lets through for the rest of the session, when the runtime says (on the button). */
       scope?: string | null;
+      /** The runtime asks for answers: `allow` then carries them (checked by the Core against this form). */
+      form?: ApprovalForm;
     }
   /** The runtime reported the request resolved (by our decision, a cancel, or its own lifecycle). */
   | { type: 'approval.resolved'; nativeRequestId: string; decision?: string | null }

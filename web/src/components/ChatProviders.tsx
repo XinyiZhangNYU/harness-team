@@ -974,6 +974,16 @@ export function ChatSettingsFields(props: { value: ChatMemberSettings; model: Ch
 
 export const chatDefaults = (): ChatMemberSettings => ({ ...DEFAULT_CHAT_MEMBER });
 
+/** A member added in the dialog starts with every tool on; the ones its model cannot use are dropped when it is saved. */
+export const newChatDefaults = (): ChatMemberSettings => ({ ...DEFAULT_CHAT_MEMBER, projectTools: true, webSearch: true, webFetch: true });
+
+/** The settings saved for a new member: tools its model cannot use are off. */
+export const forModel = (s: ChatMemberSettings, model: ChatModel | null): ChatMemberSettings => ({
+  ...s,
+  webSearch: s.webSearch && !!model?.webSearch,
+  webFetch: !!s.webFetch && !!model?.tools,
+});
+
 /** A chat model as already loaded (display only; no request). */
 export function cachedChatModel(providerId: string | null, id: string | null): ChatModel | null {
   if (!providerId || !id) return null;

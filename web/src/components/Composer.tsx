@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ALL_HANDLE, type AgentCommands, type AgentWithStatus, handleKey, parseSlashCommand, type RuntimeCommand, type RuntimeDescriptor } from '../../../shared/protocol.ts';
+import { ALL_HANDLE, type AgentCommands, type AgentWithStatus, handleKey, parseSlashCommand, type RuntimeCommand, type RuntimeDescriptor, type SteerSkip } from '../../../shared/protocol.ts';
 import { api, newClientMessageId } from '../api.ts';
 import { clearSentDraft, historyStep, loadDraft, matchCommands, menuKey, onFirstLine, onLastLine, type Quote, saveDraft, withQuotes } from '../composer-logic.ts';
 import type { AttachmentDrafts } from '../attachments.ts';
@@ -67,7 +67,8 @@ export function Composer(props: {
   defaultMemberId?: string | null;
   /** Opens a member's settings (where /model and /effort are changed). */
   onOpenMember?: (agentId: string) => void;
-  onSend: (body: string, clientMessageId: string, attachmentIds: string[]) => Promise<void>;
+  /** `steer` (Ctrl+Enter): into the addressed members' running turns; resolves with those that got it queued instead. */
+  onSend: (body: string, clientMessageId: string, attachmentIds: string[], steer: boolean) => Promise<SteerSkip[]>;
   onError: (err: unknown) => void;
   /** No live connection to the server: typing is fine, sending waits until it is back. */
   offline?: boolean;
@@ -104,6 +105,13 @@ export function Composer(props: {
   const [openQuote, setOpenQuote] = useState<string | null>(null);
   /** "@all /compact" waiting for the user to accept the billed requests of these chat members. */
   const [billed, setBilled] = useState<AgentWithStatus[] | null>(null);
+  /** Members a Ctrl+Enter message was queued for instead (shown for a few seconds). */
+  const [steerSkips, setSteerSkips] = useState<SteerSkip[]>([]);
+  useEffect(() => {
+    if (!steerSkips.length) return;
+    const timer = setTimeout(() => setSteerSkips([]), 5000);
+    return () => clearTimeout(timer);
+  }, [steerSkips]);
   const quotesNow = useRef(quotes);
   quotesNow.current = quotes;
   useEffect(() => {
@@ -263,7 +271,7 @@ export function Composer(props: {
   const hasAttachments = atts.drafts.length > 0;
   const quoted = quotes.filter((q) => q.text.trim() || q.note.trim());
   const canSend = !sending && !props.offline && atts.ready && (!!text.trim() || hasAttachments || quoted.length > 0);
-  const send = async (confirmed = false) => {
+  const send = async (confirmed = false, steer = false) => {
     const typed = text.trim();
     if (!canSend) return;
     const sentQuotes = quotes;
@@ -294,8 +302,9 @@ export function Composer(props: {
     const roomId = props.roomId;
     setSending(true);
     try {
-      await props.onSend(body, pendingId.current, atts.drafts.map((d) => d.info!.id));
+      const queued = await props.onSend(body, pendingId.current, atts.drafts.map((d) => d.info!.id), steer && !slash);
       pendingId.current = newClientMessageId();
+      if (mounted.current) setSteerSkips(queued);
       // The room's kept draft goes unless it was changed since (the composer may be gone after a room switch).
       clearSentDraft(roomId, typed);
       if (roomQuotes.get(roomId) === sentQuotes) roomQuotes.delete(roomId);
@@ -356,6 +365,14 @@ export function Composer(props: {
   const editing = quotes.find((q) => q.id === openQuote);
   return (
     <div className={`composer${hasAttachments ? ' has-attachments' : ''}${quotes.length ? ' has-quotes' : ''}`}>
+      {steerSkips.length > 0 && (
+        <div className="steer-notice" role="status">
+          {(['unsupported', 'elsewhere'] as const).map((reason) => {
+            const handles = steerSkips.filter((s) => s.reason === reason).map((s) => `@${s.handle}`);
+            return handles.length ? <div key={reason}>{t(reason === 'unsupported' ? 'composer.steerUnsupported' : 'composer.steerElsewhere', { handles: handles.join(t('common.listSep')) })}</div> : null;
+          })}
+        </div>
+      )}
       <DraftStrip drafts={atts.drafts} onRemove={atts.remove} />
       {quotes.length > 0 && (
         <ul className="quote-strip" aria-label={t('quote.list')}>
@@ -577,9 +594,10 @@ export function Composer(props: {
             showEntry(draft.current, draft.current.length);
             return;
           }
+          // Enter queues for a busy member; Ctrl/Cmd+Enter adds the message to its running turn when it can take it.
           if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            void send();
+            void send(false, e.ctrlKey || e.metaKey);
           }
         }}
       />

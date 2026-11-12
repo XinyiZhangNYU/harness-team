@@ -9,11 +9,14 @@ import type {
   AgentDetailResponse,
   AgentEffectiveConfig,
   AgentPermissionReport,
+  ApprovalAnswers,
   ApprovalDecision,
+  ApprovalForm,
   AgentStatus,
   AgentWithStatus,
   AttachmentInfo,
   DeliveryInfo,
+  DeliveryState,
   Message,
   MessageIntent,
   MessageKind,
@@ -36,10 +39,12 @@ import type {
   PermissionMode,
   PermissionModeAvailability,
   RuntimeBilling,
+  SteerSkip,
 } from '../../shared/protocol.ts';
 import { errorNotice, L, type Localized, N, type NoticeText, permissionLabel, zhOf, zhText } from '../../shared/notices.ts';
 import { ALL_HANDLE, ATTACHMENT_LIMITS, type ChatMemberSettings, DEFAULT_CHAT_MEMBER, COLLAB_WARNING_VERSION, PERMISSION_WARNING_VERSION, RISKY_PERMISSION_MODES, HANDLE_MAX, HANDLE_PATTERN, isAgentAvatar, isAvatarDefaultKey, PERMISSION_MODES, type AvatarDefaults, RESERVED_HANDLES, handleKey, handleLength, parseMentions, parseSlashCommand, unquotePath } from '../../shared/protocol.ts';
 import type { AdapterRegistry } from './adapters/registry.ts';
+import { answersSummary, checkAnswers } from './adapters/forms.ts';
 import type { ChatProviders } from './adapters/chat/providers.ts';
 import {
   type AgentSession,
@@ -52,12 +57,13 @@ import {
   type TurnAttachment,
   type TurnEvent,
   type TurnResult,
+  type SteerAnswer,
   type TurnUsage,
 } from './adapters/types.ts';
 import { AttachmentFiles, safeAttachmentName, detectType } from './attachments.ts';
 import type { EventBus } from './events.ts';
 import { AttachmentBindError, type DeliveryStamp, type Store, type StoredAttachment } from './store.ts';
-import { TEAM_MCP_SERVER, buildEnvelope, buildTeamInstructions, instructionsVersion, messageText, senderLabel } from './team/envelope.ts';
+import { TEAM_MCP_SERVER, type FolderPeer, buildEnvelope, buildSteerText, buildTeamInstructions, instructionsVersion, messageText, senderLabel } from './team/envelope.ts';
 import { projectDirOf } from './workspaces.ts';
 import { redactStrings, redactText, StreamRedactor } from './redact.ts';
 import { redactLocalized } from './message-copy.ts';
@@ -84,6 +90,10 @@ interface AgentRuntimeState {
   /** Room and hop of the batch being processed (used for Team MCP sends during the turn). */
   turnRoom: string | null;
   turnHop: number;
+  /** Working folder of the batch being processed (workspaceKey), whether or not it holds that folder's lock. */
+  turnFolder: string | null;
+  /** Messages the batch being processed handles. */
+  turnMessages: string[];
   /** Agents this agent already woke via Team MCP during the current turn (its final reply will not wake them again). */
   pushed: Set<string>;
   /** Set while the agent waits for another agent to release a shared workspace; aborting it cancels the wait. */
@@ -95,6 +105,20 @@ interface AgentRuntimeState {
    * (wider than `turnRoom`). A room with an active agent cannot be deleted.
    */
   activeRoom: string | null;
+  /** The turn running now (from its reply placeholder on): user messages added to it (steer) share its reply. */
+  live: LiveTurn | null;
+}
+
+/** The turn an agent is running now, as far as user messages added to it (steer) are concerned. */
+interface LiveTurn {
+  /** The turn's current reply placeholder. */
+  slotId: () => string;
+  /** Deliveries added to the turn: they end with it. */
+  steered: DeliveryInfo[];
+  /** Added deliveries whose first output after them has not been seen yet. */
+  unreplied: DeliveryInfo[];
+  /** Set when the turn ended (how, for a message the runtime took just before). */
+  ended: { state: DeliveryState; error: string | null } | null;
 }
 
 /** A native approval request that is still pending inside a running turn (only these can be answered). */
@@ -104,6 +128,7 @@ interface LiveApproval {
   session: AgentSession;
   nativeRequestId: string;
   options: ApprovalDecision[];
+  form: ApprovalForm | null;
 }
 
 /** Exclusive use of one working directory: the holder runs a turn, the others wait in order. */
@@ -144,8 +169,9 @@ const AGENT_BODY_MAX = 8_000;
  *   with hop = (lowest hop of the batch that produced it) + 1. Text without an @mention wakes nobody.
  * - Past the room's hop limit the delivery is recorded as `skipped`; while the room's auto-collaboration is paused
  *   agent-to-agent deliveries are `held` until resumed. User messages are never held or skipped.
- * - Each agent runs one turn at a time. Deliveries that arrive while it is busy wait (no steering, no interrupt)
- *   and are coalesced into one envelope for its next turn in that room.
+ * - Each agent runs one turn at a time. Deliveries that arrive while it is busy wait (no interrupt) and are coalesced
+ *   into one envelope for its next turn in that room. The exception is a user message sent with `steer` (Ctrl+Enter):
+ *   it joins the turn the agent is running in that room when its session can take it, and is answered by that turn.
  */
 export class Core {
   private readonly store: Store;
@@ -174,6 +200,8 @@ export class Core {
   private readonly parked = new Map<string, DeliveryInfo[]>();
   /** "agent:room" pairs whose next envelope says the earlier native session was lost (user chose a new session). */
   private readonly sessionReset = new Set<string>();
+  /** "agent:room" -> user messages added to a running turn there (steer); kept out of the next turn's context. */
+  private readonly steeredIds = new Map<string, Set<string>>();
   /** messageId -> pending native request that the user can still answer. */
   private readonly liveApprovals = new Map<string, LiveApproval>();
   /** Normalized workspace path -> lock. Agents sharing a directory run their turns one after another. */
@@ -406,13 +434,20 @@ export class Core {
    * What the desktop shell shows outside the window: members with a turn running or queued for their folder (the
    * computer is kept awake meanwhile), and native approvals still waiting for the user (Dock / taskbar badge).
    */
-  attention(): { working: number; approvals: number } {
+  /**
+   * The desktop shell's counts. `busy` leaves out members whose turn is held by an approval the user has not answered:
+   * the shell keeps the computer awake (when the user turned that on) only while some member actually runs.
+   */
+  attention(): { working: number; busy: number; approvals: number } {
     let working = 0;
+    let busy = 0;
+    const held = new Set([...this.liveApprovals.values()].map((l) => l.agentId));
     for (const a of this.store.listAgents()) {
       const s = this.statusOf(a);
       if (s === 'working' || s === 'waiting') working++;
+      if (s === 'working' && !held.has(a.id)) busy++;
     }
-    return { working, approvals: this.liveApprovals.size };
+    return { working, busy, approvals: this.liveApprovals.size };
   }
 
   /**
@@ -624,12 +659,14 @@ export class Core {
     collabMode?: CollabMode;
     acknowledgeCollabRisk?: string;
     language?: AgentLanguage | null;
+    chrome?: boolean;
     providerId?: string | null;
     chat?: ChatMemberSettings;
   }): Promise<AgentWithStatus> {
     const displayName = checkDisplayName(input.displayName);
     const isChat = input.runtimeKind === 'chat';
-    if (!isChat && (input.providerId || input.chat)) throw new CoreError(400, L('只有聊天成员有供应商', 'Only chat members have a provider'));
+    if (!isChat && (input.providerId || input.chat)) throw new CoreError(400, L('只有 API 成员有供应商', 'Only API members have a provider'));
+    if (input.chrome !== undefined && input.runtimeKind !== 'claude') throw new CoreError(400, L('只有 Claude Code 成员可以启用 Claude in Chrome', 'Only Claude Code members can use Claude in Chrome'));
     const permissionMode = checkPermissionMode(input.runtimeKind, input.permissionMode);
     checkPermissionRisk(permissionMode, input.acknowledgePermissionRisk);
     const fullCollab = input.collabMode === 'full';
@@ -697,6 +734,7 @@ export class Core {
         effort,
         permissionMode,
         language: input.language ?? null,
+        ...(input.runtimeKind === 'claude' ? { chrome: input.chrome === true } : {}),
         ...(isChat ? { providerId: input.providerId ?? null, chat: input.chat ?? { ...DEFAULT_CHAT_MEMBER } } : {}),
       });
     } catch (e) {
@@ -789,9 +827,9 @@ export class Core {
 
   /** A chat member needs an enabled provider and model; its reasoning level is one of that model's tags. */
   private validateChatConfig(providerId: string | null, model: string | null, effort: string | null) {
-    if (!this.chatModels) throw new CoreError(400, L('聊天成员在这次启动中不可用', 'Chat members are not available in this run'));
-    if (!providerId) throw new CoreError(400, L('请为聊天成员选择一个供应商', 'Choose a provider for the chat member'));
-    if (!model) throw new CoreError(400, L('请为聊天成员选择一个模型', 'Choose a model for the chat member'));
+    if (!this.chatModels) throw new CoreError(400, L('API 成员在这次启动中不可用', 'API members are not available in this run'));
+    if (!providerId) throw new CoreError(400, L('请为 API 成员选择一个供应商', 'Choose a provider for the API member'));
+    if (!model) throw new CoreError(400, L('请为 API 成员选择一个模型', 'Choose a model for the API member'));
     const r = this.chatModels.resolve(providerId, model);
     if ('error' in r) throw new CoreError(400, r.error);
     if (effort !== null && !r.model.reasoningLevels.includes(effort)) {
@@ -860,6 +898,7 @@ export class Core {
       collabMode?: CollabMode;
       acknowledgeCollabRisk?: string;
       language?: AgentLanguage | null;
+      chrome?: boolean;
       chat?: ChatMemberSettings;
     },
   ): Promise<UpdateAgentResponse> {
@@ -883,8 +922,11 @@ export class Core {
     if (permissionMode !== cur.permissionMode) checkPermissionRisk(permissionMode, patch.acknowledgePermissionRisk);
     if (permissionMode !== cur.permissionMode) await this.checkModeAvailable(cur.runtimeKind, permissionMode, cur.workspace);
     const modelChanged = model !== cur.model || effort !== cur.effort;
-    const configChanged = modelChanged || permissionMode !== cur.permissionMode;
-    if (patch.chat !== undefined && cur.runtimeKind !== 'chat') throw new CoreError(400, L('只有聊天成员有这些设置', 'Only chat members have these settings'));
+    if (patch.chrome !== undefined && cur.runtimeKind !== 'claude') throw new CoreError(400, L('只有 Claude Code 成员可以启用 Claude in Chrome', 'Only Claude Code members can use Claude in Chrome'));
+    // A launch flag, like the model: the idle process is restarted on the same session before the next turn.
+    const chromeChanged = patch.chrome !== undefined && patch.chrome !== cur.chrome;
+    const configChanged = modelChanged || permissionMode !== cur.permissionMode || chromeChanged;
+    if (patch.chat !== undefined && cur.runtimeKind !== 'chat') throw new CoreError(400, L('只有 API 成员有这些设置', 'Only API members have these settings'));
     if (modelChanged) {
       if (cur.runtimeKind === 'chat') this.validateChatConfig(cur.providerId, model, effort);
       else await this.validateModelConfig(cur.runtimeKind, model, effort, cur.workspace);
@@ -904,6 +946,7 @@ export class Core {
       permissionMode,
       ...(avatarChanged ? { avatar: patch.avatar || null } : {}),
       ...(languageChanged ? { language: patch.language ?? null } : {}),
+      ...(chromeChanged ? { chrome: patch.chrome } : {}),
       ...(chatChanged ? { chat: patch.chat } : {}),
     });
     if (collabChanged) agent = this.setCollabMode(agent, patch.collabMode!);
@@ -920,7 +963,10 @@ export class Core {
         handle: agent.handle,
         model: model ?? N('word.followDefault'),
         effort: effort ?? N('word.default'),
-        perm: permissionLabel(agent.runtimeKind, permissionMode),
+        perm:
+          agent.runtimeKind === 'claude'
+            ? N('perm.withChrome', { perm: permissionLabel('claude', permissionMode), state: N(agent.chrome ? 'word.on' : 'word.off') })
+            : permissionLabel(agent.runtimeKind, permissionMode),
         when: N(busy ? 'agent.applyAfterTurn' : 'agent.applyNext'),
       });
       for (const roomId of rooms) this.systemNotice(roomId, saved);
@@ -1207,6 +1253,15 @@ export class Core {
 
   /** Posts a message from the local user. Idempotent on clientMessageId. */
   postUserMessage(roomId: string, body: string, clientMessageId: string, attachmentIds: string[] = []): Message {
+    return this.sendUserMessage(roomId, body, clientMessageId, attachmentIds).message;
+  }
+
+  /**
+   * Posts a message from the local user. With `steer` (Ctrl+Enter), a member working on a turn in this chat whose
+   * runtime can take it gets the message inside that turn; `queued` lists the working members that get it with their
+   * next turn instead. A command is always a turn of its own.
+   */
+  sendUserMessage(roomId: string, body: string, clientMessageId: string, attachmentIds: string[] = [], steer = false): { message: Message; queued: SteerSkip[] } {
     if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
     const text = body.replace(/\r\n/g, '\n');
     if (!text.trim() && !attachmentIds.length) throw new CoreError(400, 'message body is empty');
@@ -1216,11 +1271,11 @@ export class Core {
     if (new Set(attachmentIds).size !== attachmentIds.length) throw new CoreError(400, 'duplicate attachment');
 
     const existing = this.store.findByClientMessageId(roomId, clientMessageId);
-    if (existing) return existing;
+    if (existing) return { message: existing, queued: [] };
 
     const toAll = parseSlashCommand(text);
     if (toAll && handleKey(toAll.handle) === ALL_HANDLE && (toAll.name === 'compact' || this.isMemberCommand(roomId, toAll.name))) {
-      return this.postCommandToAll(roomId, text, toAll.name, toAll.args, clientMessageId, attachmentIds);
+      return { message: this.postCommandToAll(roomId, text, toAll.name, toAll.args, clientMessageId, attachmentIds), queued: [] };
     }
 
     const command = this.commandOf(roomId, text);
@@ -1280,8 +1335,9 @@ export class Core {
     }
     if (contentRedacted && targets.length) this.pendingUserInputs.set(message.id, { roomId, body: text, commandArgs: command?.args });
     this.bus.publish({ type: 'message.created', message });
-    this.deliver(message, targets, 'user', 0);
-    return message;
+    const queued: SteerSkip[] = [];
+    this.deliver(message, targets, 'user', 0, false, steer && !command ? queued : null);
+    return { message, queued };
   }
 
   /** Whether some member of the room offers `/name` (a runtime command or a listed skill). */
@@ -1368,7 +1424,7 @@ export class Core {
    * tool for this and their chat text is never interpreted as a decision). The decision is sent on the exact native
    * request id of the running turn; if that request is no longer pending nothing is sent.
    */
-  decideApproval(messageId: string, decision: ApprovalDecision): Message {
+  decideApproval(messageId: string, decision: ApprovalDecision, rawAnswers?: unknown): Message {
     const msg = this.store.getMessage(messageId);
     if (!msg || msg.meta?.type !== 'approval') throw new CoreError(404, L('找不到该审批请求', 'Approval request not found'));
     const meta = msg.meta;
@@ -1379,7 +1435,14 @@ export class Core {
     }
     if (!live.options.includes(decision)) throw new CoreError(400, L('此请求不支持“{decision}”，可选：{options}', 'This request does not support “{decision}”; available: {options}', { decision, options: live.options.join(', ') }));
     if (!live.session.respondApproval) throw new CoreError(409, L('该运行时不支持在群聊中处理审批', 'This runtime does not support approvals in the chat'));
-    const answer = live.session.respondApproval(live.nativeRequestId, decision);
+    // A form is answered only by the user's own answers, checked here against what the runtime asked for.
+    let answers: ApprovalAnswers | undefined;
+    if (live.form && decision !== 'deny') {
+      const checked = checkAnswers(live.form, rawAnswers);
+      if (!checked.ok) throw new CoreError(400, checked.error);
+      answers = checked.answers;
+    }
+    const answer = live.session.respondApproval(live.nativeRequestId, decision, answers);
     if (!answer.ok) {
       this.liveApprovals.delete(messageId);
       throw new CoreError(409, L('未发送：{error}', 'Not sent: {error}', { error: answer.error }));
@@ -1395,6 +1458,7 @@ export class Core {
         decidedBy: 'user',
         userDecision: decision,
         decidedAt: new Date().toISOString(),
+        ...(live.form?.fields.length && answers ? { answers: redactStrings(answersSummary(live.form, answers)) } : {}),
       },
     });
     this.bus.publish({ type: 'message.updated', message: updated });
@@ -1748,7 +1812,11 @@ export class Core {
   }
 
   /** Creates one delivery per target (idempotent per message+agent) and queues/holds/skips it. */
-  private deliver(message: Message, targets: Agent[], origin: 'user' | 'agent', hop: number, outsideTurn = false): DeliveryInfo[] {
+  /**
+   * `steer` (a user message sent with Ctrl+Enter): a target running a turn in this room whose runtime can take it gets
+   * the message inside that turn; the other working targets are listed in `steer` and get it with their next turn.
+   */
+  private deliver(message: Message, targets: Agent[], origin: 'user' | 'agent', hop: number, outsideTurn = false, steer: SteerSkip[] | null = null): DeliveryInfo[] {
     if (!targets.length) return [];
     const room = this.store.getRoom(message.roomId)!;
     const limit = room.autoHopLimit;
@@ -1783,7 +1851,9 @@ export class Core {
       if (!d) continue; // already delivered to this agent
       created.push(d);
       this.publishDelivery(d);
-      if (d.state === 'queued') this.enqueue(d);
+      if (d.state !== 'queued') continue;
+      if (steer && this.steerOrQueue(d, agent, steer)) continue;
+      this.enqueue(d);
     }
     const blocked = created.filter((d) => restricted.has(d.agentId));
     if (blocked.length) {
@@ -1812,6 +1882,74 @@ export class Core {
     this.kick(d.agentId);
   }
 
+  /**
+   * Steer (see deliver): true when the delivery goes to the turn its target is running in this room. False when it
+   * waits in the queue instead; a target that is working is then listed in `skips`.
+   */
+  private steerOrQueue(d: DeliveryInfo, agent: Agent, skips: SteerSkip[]): boolean {
+    const st = this.state(agent.id);
+    // Idle, or waiting for its folder: the message goes with the turn that starts next anyway.
+    if (!st.current) return false;
+    if (st.turnRoom !== d.roomId) {
+      skips.push({ agentId: agent.id, handle: agent.handle, reason: 'elsewhere' });
+      return false;
+    }
+    const session = this.sessions.get(`${agent.id}:${d.roomId}`);
+    if (!session?.steer || !this.registry.get(agent.runtimeKind)?.describe().capabilities.steer) {
+      skips.push({ agentId: agent.id, handle: agent.handle, reason: 'unsupported' });
+      return false;
+    }
+    // The turn is still being prepared: nothing to add the message to yet.
+    if (!st.live) return false;
+    void this.steerInto(d, agent, session, st.live);
+    return true;
+  }
+
+  /** Hands the message to the running turn; when the runtime does not take it, it waits for the next turn. */
+  private async steerInto(d: DeliveryInfo, agent: Agent, session: AgentSession, live: LiveTurn): Promise<void> {
+    const queue = () => {
+      const cur = this.store.getDelivery(d.id);
+      if (cur?.state === 'queued') this.enqueue(cur);
+    };
+    const m = this.store.getMessage(d.messageId);
+    const room = this.store.getRoom(d.roomId);
+    if (!m || !room) return queue();
+    const raw = this.pendingUserInputs.get(m.id);
+    const source: Message = raw ? { ...m, body: raw.body, contentRedacted: undefined, redactionUncertain: undefined } : m;
+    const text = buildSteerText(
+      {
+        room,
+        language: this.languageOf(agent.id, room.id),
+        agentById: (id) => this.store.getAgent(id),
+        seqOf: (mid) => this.store.getMessage(mid)?.seq,
+        attachmentPath: this.files ? (x, a) => this.files!.pathFor(x.roomId, a.id, a.name) : undefined,
+      },
+      source,
+    );
+    const attachments = this.turnAttachments([m]).filter((a) => a.kind === 'image' || agent.runtimeKind === 'chat');
+    let answer: SteerAnswer;
+    try {
+      answer = await session.steer!({ text, messageId: m.id, ...(attachments.length ? { attachments } : {}) });
+    } catch (err) {
+      answer = { ok: false, error: errorText(err) };
+    }
+    const cur = this.store.getDelivery(d.id);
+    // Removed meanwhile (the room was cleared or deleted, or the member left).
+    if (cur?.state !== 'queued') return;
+    if (!answer.ok) return queue();
+    const key = `${agent.id}:${room.id}`;
+    this.steeredIds.set(key, (this.steeredIds.get(key) ?? new Set()).add(m.id));
+    this.publishDelivery(this.store.updateDelivery(d.id, { state: 'dispatched', replyMessageId: live.slotId(), stamp: 'dispatched' }));
+    this.publishDelivery(this.store.updateDelivery(d.id, { state: 'accepted', stamp: 'accepted' }));
+    if (live.ended) {
+      // The runtime took it, but the turn ended before the answer came back: it shares that turn's end.
+      this.publishDelivery(this.store.updateDelivery(d.id, { state: live.ended.state, error: live.ended.error, stamp: 'finished' }));
+      return;
+    }
+    live.steered.push(cur);
+    live.unreplied.push(cur);
+  }
+
   /** Deferred drain so that deliveries created in the same tick are coalesced into one turn. */
   private kick(agentId: string) {
     const st = this.state(agentId);
@@ -1830,8 +1968,10 @@ export class Core {
       while (st.queue.length > 0 && this.started) {
         const roomId = st.queue[0]!.roomId;
         st.activeRoom = roomId;
-        // A shared working directory is used by one agent at a time (no concurrent edits of the same files).
-        const key = this.workspaceKey(this.store.getAgent(agentId), roomId);
+        // A shared working directory is used by one agent at a time (no concurrent edits of the same files), unless
+        // the chat lets its members share it at once: then nobody waits and each turn is told who else works there.
+        const folder = this.workspaceKey(this.store.getAgent(agentId), roomId);
+        const key = folder && !this.store.getRoom(roomId)?.parallelInFolder ? folder : null;
         if (key && !(await this.acquireWorkspace(agentId, key, roomId))) {
           st.activeRoom = null;
           continue;
@@ -1851,6 +1991,8 @@ export class Core {
           st.current = ac;
           st.turnRoom = roomId;
           st.turnHop = Math.min(...batch.map((d) => d.hop));
+          st.turnFolder = folder;
+          st.turnMessages = batch.map((d) => d.messageId);
           st.pushed = new Set();
           this.setStatus(agentId, 'working');
           try {
@@ -1864,7 +2006,10 @@ export class Core {
             }
           } finally {
             st.current = null;
+            st.live = null;
             st.turnRoom = null;
+            st.turnFolder = null;
+            st.turnMessages = [];
             st.pushed = new Set();
           }
         } finally {
@@ -1925,8 +2070,10 @@ export class Core {
     const adapter = this.registry.get(agent.runtimeKind);
     if (!adapter) throw new Error(`runtime ${agent.runtimeKind} not registered`);
     const runtime = agent.runtimeKind;
+    // Messages the user added to this turn while it ran (steer) end with it.
+    const steered: DeliveryInfo[] = [];
     const setBatch = (patch: Parameters<Store['updateDelivery']>[1]) => {
-      for (const d of batch) this.publishDelivery(this.store.updateDelivery(d.id, patch));
+      for (const d of [...batch, ...steered]) this.publishDelivery(this.store.updateDelivery(d.id, patch));
     };
 
     let session: AgentSession;
@@ -1979,12 +2126,17 @@ export class Core {
     const upTo = Math.min(this.store.maxSeq(room.id), Math.min(...nextCommand) - 1);
     const cursor = this.store.getCursor(agent.id, room.id);
     const triggerIds = new Set(sources.map((m) => m.id));
-    const unseen = this.store.chatSince(room.id, cursor, upTo, CONTEXT_COUNT + sources.length);
-    const context = unseen.messages.filter((m) => !triggerIds.has(m.id) && m.senderId !== agent.id);
+    // Messages the user added to an earlier turn of this member here (steer) were seen in that turn.
+    const steeredKey = `${agent.id}:${room.id}`;
+    const steeredBefore = this.steeredIds.get(steeredKey) ?? new Set<string>();
+    const unseen = this.store.chatSince(room.id, cursor, upTo, CONTEXT_COUNT + sources.length + steeredBefore.size);
+    const context = unseen.messages.filter((m) => !triggerIds.has(m.id) && m.senderId !== agent.id && !steeredBefore.has(m.id));
     const shown = context.slice(-CONTEXT_COUNT);
     // Unseen chat from others that did not fit. The read cursor will stop just before the oldest of them, so the
     // default get_messages returns them; the envelope cursor still moves on (context is never repeated).
-    const omittedInfo = this.store.chatOmitted(room.id, cursor, upTo, agent.id, [...triggerIds, ...shown.map((m) => m.id)]);
+    const omittedInfo = this.store.chatOmitted(room.id, cursor, upTo, agent.id, [...triggerIds, ...shown.map((m) => m.id), ...steeredBefore]);
+    for (const id of steeredBefore) if ((this.store.getMessage(id)?.seq ?? 0) <= upTo) steeredBefore.delete(id);
+    if (!steeredBefore.size) this.steeredIds.delete(steeredKey);
     const omitted = omittedInfo.count;
     // A read cursor behind the envelope cursor marks an earlier backlog the agent has not read yet (an older envelope
     // omitted it, or get_messages only paged part of it): keep it there. Otherwise stop before this envelope's
@@ -2003,6 +2155,7 @@ export class Core {
           language,
           self: agent,
           sessionReset,
+          folderPeers: this.folderPeers(agent, room.id),
           members: this.store.listMembers(room.id),
           triggers: sources,
           context: shown,
@@ -2037,6 +2190,7 @@ export class Core {
     let slot = newSlot();
     let slotFilled = false;
     let replied = false;
+    const live: LiveTurn = { slotId: () => slot.id, steered, unreplied: [], ended: null };
     let nativeTurnId: string | undefined;
     const turnMessages = new Set<string>();
     /** The runtime's text, redacted as it arrives: `stream.shown` is what was stored and sent so far. */
@@ -2056,6 +2210,7 @@ export class Core {
       this.bus.publish({ type: 'message.updated', message: m });
     };
     const markReplied = () => {
+      for (const d of live.unreplied.splice(0)) this.publishDelivery(this.store.updateDelivery(d.id, { stamp: 'replied' }));
       if (replied) return;
       replied = true;
       setBatch({ stamp: 'replied' });
@@ -2180,11 +2335,12 @@ export class Core {
             ...(ev.reason ? { reason: redactStrings(ev.reason) } : {}),
             ...(ev.prefix ? { prefix: ev.prefix } : {}),
             ...(ev.scope ? { scope: ev.scope } : {}),
+            ...(ev.form ? { form: ev.form } : {}),
           };
           const id = claim('approval', meta, meta.title, 'streaming');
           approvals.set(ev.nativeRequestId, id);
           if (session.respondApproval) {
-            this.liveApprovals.set(id, { agentId: agent.id, roomId: room.id, session, nativeRequestId: ev.nativeRequestId, options });
+            this.liveApprovals.set(id, { agentId: agent.id, roomId: room.id, session, nativeRequestId: ev.nativeRequestId, options, form: ev.form ?? null });
           }
           return;
         }
@@ -2230,6 +2386,7 @@ export class Core {
     let result: TurnResult;
     const replyRef = { replyMessageId: () => slot.id, status: 'running' };
     this.lastReply.set(`${agent.id}:${room.id}`, replyRef);
+    this.state(agent.id).live = live;
     try {
       // The agent's saved model/effort at turn start: adapters apply it natively before the turn, never mid-turn. A
       // native command that takes no settings leaves them pending for the next turn.
@@ -2239,7 +2396,7 @@ export class Core {
         {
           text: bare ? `/${command!.name}${command!.args ? ` ${command!.args}` : ''}` : text,
           messageId: source.id,
-          config: { model: agent.model, effort: agent.effort, permissionMode: agent.permissionMode },
+          config: { model: agent.model, effort: agent.effort, permissionMode: agent.permissionMode, ...(agent.chrome ? { chrome: true } : {}) },
           ...(attachments.length ? { attachments } : {}),
           ...(command
             ? { command: { name: command.name, args: command.args, ...(command.skill ? { skill: { path: this.skillPath(agent.id, command.name) } } : {}) } }
@@ -2296,6 +2453,8 @@ export class Core {
       // A command that only showed activity (e.g. Codex's compaction item) still says it ran.
       notice(done);
     }
+    this.state(agent.id).live = null;
+    live.ended = { state: result.status, error: result.error ? zhOf(result.error) : null };
     setBatch({ state: result.status, error: result.error ? zhOf(result.error) : null, stamp: 'finished' });
     this.recordUsage(room, agent, slot.id, result);
     this.saveAdapterState(agent.id, room.id, session);
@@ -2329,6 +2488,25 @@ export class Core {
       return dir ? pathKey(dir) : null;
     }
     return null;
+  }
+
+  /**
+   * Other members running a turn in this member's working folder now (only possible where a chat lets members share
+   * a folder at once). Messages of a turn in another chat are not named.
+   */
+  private folderPeers(agent: Agent, roomId: string): FolderPeer[] {
+    const folder = this.workspaceKey(agent, roomId);
+    if (!folder) return [];
+    const peers: FolderPeer[] = [];
+    for (const [id, st] of this.agents) {
+      if (id === agent.id || !st.current || st.turnFolder !== folder) continue;
+      const peer = this.store.getAgent(id);
+      if (!peer) continue;
+      const ids = [...st.turnMessages, ...(st.live?.steered.map((d) => d.messageId) ?? [])];
+      const seqs = ids.map((m) => this.store.getMessage(m)?.seq).filter((n): n is number => n !== undefined);
+      peers.push({ handle: peer.handle, seqs: st.turnRoom === roomId ? [...new Set(seqs)].sort((a, b) => a - b) : null });
+    }
+    return peers;
   }
 
   /**
@@ -2622,7 +2800,7 @@ export class Core {
   private state(agentId: string): AgentRuntimeState {
     let st = this.agents.get(agentId);
     if (!st) {
-      st = { status: 'idle', queue: [], current: null, draining: false, kick: null, turnRoom: null, turnHop: 0, pushed: new Set(), waiting: null, unsettled: null, activeRoom: null };
+      st = { status: 'idle', queue: [], current: null, draining: false, kick: null, turnRoom: null, turnHop: 0, turnFolder: null, turnMessages: [], pushed: new Set(), waiting: null, unsettled: null, activeRoom: null, live: null };
       this.agents.set(agentId, st);
     }
     return st;

@@ -6,7 +6,10 @@ import {
   type ActivityKind,
   type AgentLanguage,
   type Agent,
+  type ApprovalAnswers,
   type ApprovalDecision,
+  type ApprovalField,
+  type ApprovalForm,
   codexImplicitEffort,
   type CodexPermissionMode,
   PERMISSION_MODES,
@@ -35,6 +38,8 @@ import {
   cwdKey,
   type SkillInfo,
   type SkillList,
+  type SteerAnswer,
+  type SteerInput,
   type TeamMcpConfig,
   type TurnEvent,
   type TurnAttachment,
@@ -48,6 +53,7 @@ import {
   unsupportedDecision,
 } from '../types.ts';
 import { JsonRpcProcess, type RpcId } from './rpc.ts';
+import { choiceTexts, elicitationContent, fieldsFromSchema } from '../forms.ts';
 
 /**
  * Codex runtime through the official `codex app-server` (stdio JSON-RPC, protocol v2).
@@ -308,23 +314,67 @@ function threadIdOf(params: any): string | undefined {
 }
 
 /** Decisions a human may give for each native request type. Anything we cannot express safely is deny-only. */
-export function approvalOptions(method: string): ApprovalDecision[] {
+export function approvalOptions(method: string, form: ApprovalForm | null = null): ApprovalDecision[] {
   switch (method) {
     case 'item/commandExecution/requestApproval':
     case 'item/fileChange/requestApproval':
     case 'execCommandApproval':
     case 'applyPatchApproval':
       return ['allow', 'allow_session', 'deny'];
+    case 'item/tool/requestUserInput':
+    case 'mcpServer/elicitation/request':
+      // Answered with the user's own answers (or, for an MCP yes / no question, a plain accept).
+      return form ? ['allow', 'deny'] : ['deny'];
     default:
-      // permissions (needs an explicit permission profile), requestUserInput (needs answers), MCP elicitation:
-      // only refusing is supported from the group chat.
+      // permissions (needs an explicit permission profile): only refusing is supported from the group chat.
       return ['deny'];
   }
 }
 
+/**
+ * The form a request asks the user to fill in: request_user_input questions, or an MCP elicitation (a flat form, an
+ * empty yes / no form such as the browser plugin's "Allow Codex to use Chrome?", or a link to open). null = nothing
+ * we can answer faithfully (the request stays refuse-only).
+ */
+export function requestForm(method: string, p: any): ApprovalForm | null {
+  if (method === 'item/tool/requestUserInput') {
+    const qs: any[] = Array.isArray(p?.questions) ? p.questions : [];
+    if (!qs.length) return null;
+    const fields: ApprovalField[] = [];
+    for (const q of qs) {
+      const id = typeof q?.id === 'string' && q.id ? q.id : null;
+      if (!id || fields.some((f) => f.id === id)) return null;
+      const label = String(q.question || q.header || id);
+      const header = typeof q.header === 'string' && q.header && q.header !== label ? q.header : null;
+      const options = Array.isArray(q.options) ? q.options.filter((o: any) => typeof o?.label === 'string' && o.label) : [];
+      if (options.length && !q.isSecret) {
+        fields.push({
+          kind: 'choice',
+          id,
+          label,
+          header,
+          options: options.map((o: any) => ({ value: o.label, label: o.label, description: typeof o.description === 'string' ? o.description : null })),
+          multiple: false,
+          other: !!q.isOther,
+          required: true,
+        });
+      } else fields.push({ kind: 'text', id, label, header, secret: !!q.isSecret, required: true });
+    }
+    return { fields };
+  }
+  if (method === 'mcpServer/elicitation/request') {
+    if (p?.mode === 'url') return typeof p.url === 'string' && /^https?:\/\//i.test(p.url) ? { fields: [], url: p.url } : null;
+    if (p?.mode === 'form' || p?.mode === 'openai/form' || p?.mode === 'openaiForm') {
+      const fields = fieldsFromSchema(p.requestedSchema);
+      return fields ? { fields } : null;
+    }
+  }
+  return null;
+}
+
 /** Sends the user's decision for one native request. Returns the native decision label. */
-function respondDecision(rpc: JsonRpcProcess, id: RpcId, method: string, decision: ApprovalDecision, lang: AgentLanguage): string {
-  switch (method) {
+function respondDecision(rpc: JsonRpcProcess, id: RpcId, p: PendingRequest, decision: ApprovalDecision, lang: AgentLanguage, answers: ApprovalAnswers = {}): string {
+  switch (p.method) {
     case 'item/commandExecution/requestApproval':
     case 'item/fileChange/requestApproval': {
       const d = decision === 'allow' ? 'accept' : decision === 'allow_session' ? 'acceptForSession' : 'decline';
@@ -342,8 +392,20 @@ function respondDecision(rpc: JsonRpcProcess, id: RpcId, method: string, decisio
       return d;
     }
     case 'mcpServer/elicitation/request':
+      if (decision === 'allow' && p.form) {
+        rpc.respond(id, { action: 'accept', content: p.form.url ? null : elicitationContent(p.form, answers), _meta: null });
+        return 'accept';
+      }
       rpc.respond(id, { action: 'decline', content: null, _meta: null });
       return 'decline';
+    case 'item/tool/requestUserInput':
+      if (decision === 'allow' && p.form) {
+        const form = p.form;
+        rpc.respond(id, { answers: Object.fromEntries(form.fields.map((f) => [f.id, { answers: choiceTexts(f, answers[f.id]) }])) });
+        return 'answered';
+      }
+      rpc.respondError(id, -32000, 'declined by the user in Harness Team');
+      return 'declined';
     default:
       rpc.respondError(id, -32000, 'denied by the user in Harness Team');
       return 'denied';
@@ -407,7 +469,8 @@ export class CodexAdapter implements RuntimeAdapter {
         nativeApprovals: true,
         interrupt: true,
         resume: true,
-        steer: false,
+        // turn/steer (app-server protocol of the installed Codex: threadId, input, expectedTurnId).
+        steer: true,
         teamMcp: true,
         standingInstructions: true,
         commands: CODEX_COMMANDS,
@@ -1215,9 +1278,14 @@ class CodexSession implements AgentSession {
     }
   }
 
-  respondApproval(nativeRequestId: string, decision: ApprovalDecision): ApprovalAnswer {
+  respondApproval(nativeRequestId: string, decision: ApprovalDecision, answers?: ApprovalAnswers): ApprovalAnswer {
     if (!this.turn) return { ok: false, error: NO_TURN };
-    return this.turn.respond(nativeRequestId, decision);
+    return this.turn.respond(nativeRequestId, decision, answers);
+  }
+
+  steer(input: SteerInput): Promise<SteerAnswer> {
+    if (!this.turn) return Promise.resolve({ ok: false, error: NO_TURN });
+    return this.turn.steer(input);
   }
 
   /** Records what Codex reported (thread open, thread/settings/updated, or the accepted turn/start parameters). */
@@ -1279,6 +1347,8 @@ class CodexSession implements AgentSession {
 interface PendingRequest {
   id: RpcId;
   method: string;
+  form: ApprovalForm | null;
+  options: ApprovalDecision[];
 }
 
 interface TurnSettingsHooks {
@@ -1384,6 +1454,8 @@ class TurnRun {
   private usageEnd: TokenBreakdown | null = null;
   /** Set by the session (OpenSessionArgs.language). */
   language: () => AgentLanguage = () => 'zh';
+  /** A slash command's turn (`/review`, `/compact`): Codex takes no added input there. */
+  private command = false;
 
   constructor(
     conn: CodexConnection,
@@ -1412,6 +1484,7 @@ class TurnRun {
     command: { name: string; args: string } | null = null,
     skill: { name: string; path: string } | null = null,
   ): Promise<TurnResult> {
+    this.command = !!command;
     const start = command
       ? codexCommandRequest(this.threadId, command)
       : {
@@ -1553,21 +1626,50 @@ class TurnRun {
     }
   }
 
+  /**
+   * Adds the user's message to this turn with `turn/steer`. `expectedTurnId` makes Codex refuse it when this turn is
+   * no longer the active one, so it is never added to a later turn.
+   */
+  async steer(input: SteerInput): Promise<SteerAnswer> {
+    if (this.command) return { ok: false, error: L('Codex 的命令回合不接受插话', 'A Codex command turn takes no added message') };
+    const turnId = this.turnId ?? (await new Promise<string | null>((r) => this.turnIdWaiters.push(r)));
+    if (this.finished || !turnId || this.signal.aborted) return { ok: false, error: NO_TURN };
+    try {
+      await this.conn.rpc.request(
+        'turn/steer',
+        {
+          threadId: this.threadId,
+          expectedTurnId: turnId,
+          input: [
+            { type: 'text', text: input.text, text_elements: [] },
+            ...(input.attachments ?? []).filter((a) => a.kind === 'image').map((a) => ({ type: 'localImage', path: a.path })),
+          ],
+        },
+        15_000,
+      );
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: L('turn/steer 失败：{error}', 'turn/steer failed: {error}', { error: (e as Error).message }) };
+    }
+  }
+
   /** The user's decision for one pending request of this turn, sent on its exact JSON-RPC id. */
-  respond(key: string, decision: ApprovalDecision): ApprovalAnswer {
+  respond(key: string, decision: ApprovalDecision, answers?: ApprovalAnswers): ApprovalAnswer {
     const p = this.pending.get(key);
     if (this.finished || !p) return { ok: false, error: REQUEST_GONE };
     if (this.signal.aborted) return { ok: false, error: REQUEST_INTERRUPTED };
-    if (!approvalOptions(p.method).includes(decision)) return { ok: false, error: unsupportedDecision(p.method, decision) };
+    if (!p.options.includes(decision)) return { ok: false, error: unsupportedDecision(p.method, decision) };
     this.pending.delete(key);
-    return { ok: true, nativeDecision: respondDecision(this.conn.rpc, p.id, p.method, decision, this.language()) };
+    return { ok: true, nativeDecision: respondDecision(this.conn.rpc, p.id, p, decision, this.language(), answers) };
   }
 
   private onServerRequest(id: RpcId, method: string, p: any): boolean {
     if (this.finished || !APPROVAL_METHODS.has(method)) return false;
     if (this.signal.aborted) return false; // interrupting: the connection-level handler cancels it
     const key = String(id);
-    this.pending.set(key, { id, method });
+    const form = requestForm(method, p);
+    const options = approvalOptions(method, form);
+    this.pending.set(key, { id, method, form, options });
     const { title, label, reason, detail } = describeRequest(method, p, this.items.get(p.itemId));
     this.emit({
       type: 'approval.requested',
@@ -1577,8 +1679,10 @@ class TurnRun {
       title,
       label,
       reason,
-      detail,
-      options: approvalOptions(method),
+      // Questions shown as a form need no list of them above it.
+      detail: form && method === 'item/tool/requestUserInput' ? null : detail,
+      options,
+      ...(form ? { form } : {}),
     });
     return true;
   }

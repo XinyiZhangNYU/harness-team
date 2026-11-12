@@ -4,7 +4,8 @@ import { L, type Localized, type NoticeText } from '../../../../shared/notices.t
 import type { PermissionMode, RuntimeBilling } from '../../../../shared/protocol.ts';
 import type { EffectivePermission } from '../types.ts';
 import { PERMISSION_MODES } from '../../../../shared/protocol.ts';
-import { AcpAdapter, type AcpAdapterOptions } from '../acp/adapter.ts';
+import { AcpAdapter, type AcpAdapterOptions, type ExtensionReply } from '../acp/adapter.ts';
+import { grokQuestion } from '../acp/questions.ts';
 import { type CliLaunch, cliFromPath, cliVersion, findCli } from '../cli-path.ts';
 
 /**
@@ -19,6 +20,7 @@ import { type CliLaunch, cliFromPath, cliVersion, findCli } from '../cli-path.ts
  * session/request_permission. `grok agent stdio` reports no session modes and ignores plan mode, so a member follows
  * Grok's own permission setting (Ask unless the user changed it in Grok).
  * A process Harness Team starts does not update the user's Grok install on its own (GROK_DISABLE_AUTOUPDATER).
+ * Its question tool (`_x.ai/ask_user_question`) is a form in the chat, answered only with what the user fills in.
  */
 
 export interface GrokDetection {
@@ -75,6 +77,17 @@ export class GrokAdapter extends AcpAdapter<GrokAdapterOptions> {
 
   get permissionModes(): readonly PermissionMode[] {
     return PERMISSION_MODES.grok;
+  }
+
+  override extensionRequest(method: string, p: any): ExtensionReply | null {
+    if (method !== '_x.ai/ask_user_question') return null;
+    const q = grokQuestion(p);
+    if (q) return this.questionReply(q, 'accepted', 'cancelled');
+    return {
+      kind: 'answer',
+      result: { outcome: 'cancelled' },
+      activity: { title: this.t('{name} 提问（无法在聊天中显示，已拒绝）', '{name} question (cannot be shown in the chat; declined)'), detail: null },
+    };
   }
 
   /** Grok falls back to XAI_API_KEY (billed as xAI API usage) when its login is missing or expired. */

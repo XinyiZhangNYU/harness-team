@@ -56,6 +56,7 @@ function toRoom(r: Row, defaultResponders: string[] = []): Room {
     pinned: Number(r.pinned ?? 0) === 1,
     archived: Number(r.archived ?? 0) === 1,
     agentLanguage: r.agent_language === 'en' ? 'en' : 'zh',
+    parallelInFolder: Number(r.parallel_in_folder ?? 0) === 1,
     defaultResponders,
   };
 }
@@ -140,6 +141,8 @@ function toAgent(r: Row): Agent {
     collabWarningVersion: r.collab_warning_version ? String(r.collab_warning_version) : null,
     billingSeen: c.billingSeen === 'subscription' || c.billingSeen === 'metered_api' ? c.billingSeen : null,
     language: c.language === 'zh' || c.language === 'en' ? c.language : null,
+    // Members created before the setting have none: off.
+    chrome: r.runtime_kind === 'claude' ? c.chrome === true : null,
     chat: r.runtime_kind === 'chat' ? chatSettings(c.chat) : null,
   };
 }
@@ -169,6 +172,8 @@ interface AgentConfigJson {
   billingSeen?: string;
   /** Agent.language; absent = the room's. */
   language?: string;
+  /** Agent.chrome (Claude Code members); absent = off. */
+  chrome?: boolean;
   /** Chat members only: ChatMemberSettings. */
   chat?: Partial<ChatMemberSettings>;
   [k: string]: unknown;
@@ -300,8 +305,8 @@ export class Store {
     if (!cur) throw new Error(`room ${id} not found`);
     const next = { ...cur, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } as Room;
     this.db
-      .prepare('UPDATE rooms SET name = ?, auto_paused = ?, auto_hop_limit = ?, project_dir = ?, pinned = ?, archived = ?, agent_language = ? WHERE id = ?')
-      .run(next.name, next.autoPaused ? 1 : 0, next.autoHopLimit ?? NO_HOP_LIMIT, next.projectDir, next.pinned ? 1 : 0, next.archived ? 1 : 0, next.agentLanguage, id);
+      .prepare('UPDATE rooms SET name = ?, auto_paused = ?, auto_hop_limit = ?, project_dir = ?, pinned = ?, archived = ?, agent_language = ?, parallel_in_folder = ? WHERE id = ?')
+      .run(next.name, next.autoPaused ? 1 : 0, next.autoHopLimit ?? NO_HOP_LIMIT, next.projectDir, next.pinned ? 1 : 0, next.archived ? 1 : 0, next.agentLanguage, next.parallelInFolder ? 1 : 0, id);
     return this.getRoom(id)!;
   }
 
@@ -553,6 +558,7 @@ export class Store {
     effort?: string | null;
     permissionMode?: PermissionMode | null;
     language?: AgentLanguage | null;
+    chrome?: boolean;
     /** Chat members: their provider. */
     providerId?: string | null;
     chat?: ChatMemberSettings | null;
@@ -575,6 +581,7 @@ export class Store {
       collabWarningVersion: null,
       billingSeen: null,
       language: input.language ?? null,
+      chrome: input.runtimeKind === 'claude' ? input.chrome === true : null,
       chat: input.runtimeKind === 'chat' ? (input.chat ?? { ...DEFAULT_CHAT_MEMBER }) : null,
     };
     const config: AgentConfigJson = {};
@@ -584,6 +591,7 @@ export class Store {
     if (agent.effort) config.effort = agent.effort;
     if (agent.permissionMode) config.permissionMode = agent.permissionMode;
     if (agent.language) config.language = agent.language;
+    if (agent.chrome) config.chrome = true;
     this.db
       .prepare(
         `INSERT INTO agents (id, handle, display_name, runtime_kind, is_mock, config_json, created_at, provider_id, collab_mode)
@@ -629,6 +637,7 @@ export class Store {
       permissionMode?: PermissionMode | null;
       avatar?: string | null;
       language?: AgentLanguage | null;
+      chrome?: boolean;
       chat?: ChatMemberSettings;
     },
   ): Agent {
@@ -655,6 +664,10 @@ export class Store {
     if (patch.language !== undefined) {
       if (patch.language) config.language = patch.language;
       else delete config.language;
+    }
+    if (patch.chrome !== undefined) {
+      if (patch.chrome) config.chrome = true;
+      else delete config.chrome;
     }
     if (patch.displayName !== undefined) {
       this.db.prepare('UPDATE agents SET display_name = ?, config_json = ? WHERE id = ?').run(patch.displayName, JSON.stringify(config), id);

@@ -19,8 +19,10 @@ import { redactText } from '../../redact.ts';
  * billed per token; the note says so.
  * Tool approvals come through session/request_permission; "Approve for this session" is never chosen. Kimi's session
  * modes (default / plan / auto / yolo) are the member's permission modes; yolo approves everything and is risky.
- * Questions Kimi asks the user (AskUserQuestion, bridged through request_permission as `q<n>_*` options) are skipped
- * instead of picking an answer, and a plan review is an approval card whose answers are Kimi's own.
+ * Questions Kimi asks the user (AskUserQuestion) come as elicitation/create forms (offered in initialize; every
+ * question, multi-select included) and are answered only with what the user fills in. Should Kimi fall back to its
+ * request_permission bridge (`q<n>_*` options), the question is skipped instead of picking an answer. A plan review is
+ * an approval card whose answers are Kimi's own.
  * `kimi acp` runs no update check of its own (only the interactive `kimi` does).
  */
 
@@ -78,6 +80,8 @@ export class KimiAdapter extends AcpAdapter<KimiAdapterOptions> {
     'Kimi Code is not logged in: run kimi in your own terminal and log in with /login (or run kimi acp --login), then try again',
   );
   override readonly ruleFiles = ['AGENTS.md', 'CLAUDE.md'];
+  /** Its question tool asks through elicitation/create (a form in the chat) when the client offers it. */
+  protected override readonly formElicitation = true;
 
   get permissionModes(): readonly PermissionMode[] {
     return PERMISSION_MODES.kimi;

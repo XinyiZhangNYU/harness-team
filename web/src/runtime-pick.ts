@@ -51,7 +51,7 @@ const MEMBER_NAME: Record<RuntimeDescriptor['kind'], string> = {
   cursor: 'Cursor',
   grok: 'Grok',
   kimi: 'Kimi',
-  chat: 'Chat',
+  chat: 'API',
 };
 
 /** The name the add-member form starts with: the harness's short name, numbered from 2 when taken (any case). */

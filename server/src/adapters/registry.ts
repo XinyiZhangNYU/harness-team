@@ -97,11 +97,11 @@ const PLANNED: Record<Exclude<RuntimeKind, 'mock'>, RuntimeDescriptor> = {
   },
   chat: {
     kind: 'chat',
-    label: 'Chat',
+    label: 'API',
     isMock: false,
     available: false,
     installed: false,
-    note: L('未启用：本次启动未注册聊天成员。', 'Not enabled: chat members were not registered in this run.'),
+    note: L('未启用：本次启动未注册 API 成员。', 'Not enabled: API members were not registered in this run.'),
     requiresWorkspace: false,
     capabilities: NO_CAPABILITIES,
   },

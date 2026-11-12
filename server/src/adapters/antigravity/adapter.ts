@@ -18,6 +18,8 @@ import { type CliLaunch, cliFromPath, findCli } from '../cli-path.ts';
  * "always". A member's permission mode is the runtime's own session mode, set before the turn like the model (nothing
  * is sent for "follow my settings"). Only a member whose mode is skip-permissions (chosen by the user after the risk
  * warning, never a default) gets its own `agy acp` process started with --dangerously-skip-permissions.
+ * Questions the model asks the user come as elicitation/create forms (offered in initialize) and are answered only
+ * with what the user fills in.
  */
 
 /** How the runtime is started: `agy acp` (the CLI) or the Registry ACP binary itself. */
@@ -121,6 +123,8 @@ export class AntigravityAdapter extends AcpAdapter<AntigravityAdapterOptions> {
   );
   override readonly ruleFiles = ['AGENTS.md', 'GEMINI.md'];
   override readonly skipPermissionsFlag = SKIP_FLAG;
+  /** Its question tool asks through elicitation/create (a form in the chat) when the client offers it. */
+  protected override readonly formElicitation = true;
 
   get permissionModes(): readonly PermissionMode[] {
     return PERMISSION_MODES.antigravity;

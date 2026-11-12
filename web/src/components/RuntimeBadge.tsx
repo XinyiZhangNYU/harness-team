@@ -12,7 +12,7 @@ export const RUNTIME_NAME: Record<AgentWithStatus['runtimeKind'], string> = {
   cursor: 'Cursor',
   grok: 'Grok',
   kimi: 'Kimi Code',
-  chat: 'Chat',
+  chat: 'API',
 };
 
 /**
@@ -71,10 +71,13 @@ export function RuntimeBadge({ agent, billing }: { agent: AgentWithStatus; billi
   const legacy = !!agent.providerId && agent.runtimeKind !== 'chat';
   // On a message: how the member was billed when it wrote it (older messages did not record it).
   const metered = (billing !== undefined ? billing : agent.billing) === 'metered_api';
+  const name = RUNTIME_NAME[agent.runtimeKind];
+  // API members are named "API", which is also the English metered tag: not said twice.
+  const meteredTag = metered && t('billing.metered') !== name ? t('billing.metered') : null;
   return (
     <span className={`badge badge-${agent.runtimeKind}${legacy ? ' badge-off' : ''}`} title={agent.workspace ?? undefined}>
-      {RUNTIME_NAME[agent.runtimeKind]}
-      {legacy ? ` · ${t('agent.unavailable')}` : metered ? ` · ${t('billing.metered')}` : ''}
+      {name}
+      {legacy ? ` · ${t('agent.unavailable')}` : meteredTag ? ` · ${meteredTag}` : ''}
     </span>
   );
 }

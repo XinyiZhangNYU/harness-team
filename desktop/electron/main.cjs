@@ -14,6 +14,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { attachmentPath, canOpenDirectly } = require('./attachment-open.cjs');
 const { readState, restoreBounds, writeState } = require('./window-state.cjs');
+const { keepAwakeWanted, readPrefs, writePrefs } = require('./prefs.cjs');
 const { createUpdater, launchInstaller } = require('./updater.cjs');
 const { PAGE_COMMANDS, REPO_URL, secondLaunchNotice, cleanMenuState, diagnosticsText, emptyMenuState, isSettingsKey, menuTemplate, osLabel } = require('./menu.cjs');
 
@@ -59,8 +60,13 @@ function main() {
   /** Reads Core's attention counts every ATTENTION_POLL_MS while the window exists. */
   let attentionTimer = null;
   let polling = false;
-  /** powerSaveBlocker id while members work, else null. */
+  /** powerSaveBlocker id while members work (and the user turned keep-awake on), else null. */
   let keepAwakeId = null;
+  /** The shell's own settings; read once the app is ready (userData). */
+  let prefs = null;
+  let prefsFile = null;
+  /** Core's last /api/attention counts, so a changed setting takes effect at once. */
+  let lastAttention = null;
   let lastApprovals = 0;
   /** @type {Electron.NativeImage | null} */
   let overlayDot = null;
@@ -223,6 +229,8 @@ function main() {
   }
 
   const windowStateFile = path.join(app.getPath('userData'), 'window-state.json');
+  prefsFile = path.join(app.getPath('userData'), 'prefs.json');
+  prefs = readPrefs(prefsFile);
   let saveStateTimer = null;
   function saveWindowState() {
     clearTimeout(saveStateTimer);
@@ -388,6 +396,19 @@ function main() {
       void confirmAndQuit();
     });
     // Updates: the page shows the state in the title bar and asks for the download and the restart.
+    // Settings → keep the computer awake while members work (off unless the user turns it on).
+    ipcMain.removeHandler('ht:keep-awake-get');
+    ipcMain.handle('ht:keep-awake-get', (event) => (fromPage(event) && prefs ? prefs.keepAwake : null));
+    ipcMain.removeHandler('ht:keep-awake-set');
+    ipcMain.handle('ht:keep-awake-set', (event, on) => {
+      if (!fromPage(event) || !prefs || typeof on !== 'boolean') return null;
+      const next = { ...prefs, keepAwake: on };
+      if (!writePrefs(prefsFile, next)) return prefs.keepAwake;
+      prefs = next;
+      log.write(`[shell] keep awake while members work: ${on ? 'on' : 'off'}`);
+      setKeepAwake(lastAttention ? keepAwakeWanted(prefs, lastAttention) : false);
+      return prefs.keepAwake;
+    });
     ipcMain.removeHandler('ht:update-get');
     ipcMain.handle('ht:update-get', (event) => (fromPage(event) && updater ? updater.state() : null));
     ipcMain.removeAllListeners('ht:update-action');
@@ -420,14 +441,15 @@ function main() {
     return res.json();
   }
 
-  // ---- Outside the window: keep the computer awake while members work, show approvals waiting for the user ----
+  // ---- Outside the window: keep the computer awake while members work (if turned on), show approvals waiting ----
   async function pollAttention() {
     if (quitting || polling || !info) return;
     polling = true;
     try {
       const a = await coreGet('/api/attention');
       if (quitting) return;
-      setKeepAwake(a.working > 0);
+      lastAttention = a;
+      setKeepAwake(prefs ? keepAwakeWanted(prefs, a) : false);
       showApprovals(a.approvals);
     } catch {
       // Core busy or stopping: try again at the next tick
@@ -436,7 +458,10 @@ function main() {
     }
   }
 
-  /** Idle sleep (and App Nap) would cut members' turns off; the display may still sleep. Lid close still sleeps. */
+  /**
+   * Idle sleep (and App Nap) would cut members' turns off; the display may still sleep. Lid close still sleeps. Only
+   * when the user turned it on in Settings, and not while every working member waits for the user's approval.
+   */
   function setKeepAwake(on) {
     if (on && keepAwakeId === null) {
       keepAwakeId = powerSaveBlocker.start('prevent-app-suspension');

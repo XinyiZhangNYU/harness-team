@@ -6,7 +6,9 @@ import { L, type Localized, localizedError, NoticeError, type NoticeText, type N
 import type {
   ActivityKind,
   AgentLanguage,
+  ApprovalAnswers,
   ApprovalDecision,
+  ApprovalForm,
   FileChange,
   PermissionMode,
   PermissionModeAvailability,
@@ -19,6 +21,7 @@ import type {
 } from '../../../../shared/protocol.ts';
 import { JsonRpcProcess, RpcError, type RpcId } from '../codex/rpc.ts';
 import { redactText } from '../../redact.ts';
+import { type AcpQuestion, elicitationQuestion } from './questions.ts';
 import {
   type AgentSession,
   type ApprovalAnswer,
@@ -149,6 +152,7 @@ function noticeEvent(n: NoticeText): { type: 'notice'; text: string; notice: Not
  * - `answer`: replied at once with `result`; `activity` (if any) is shown in the turn's activity list.
  * - `approval`: shown in the chat as an approval card; `answer` builds the reply for the user's decision, and for
  *   `cancelled` (no turn running, an interrupt, the turn ending first). Nothing is ever accepted without a click.
+ *   With a `form` (a question to the user), `allow` carries the user's answers, checked by the Core against it.
  */
 export type ExtensionReply =
   | { kind: 'answer'; result: unknown; activity?: { title: NoticeText; detail: string | null } }
@@ -159,7 +163,8 @@ export type ExtensionReply =
       /** The runtime's own names of the two answers (shown as the decision). */
       allowName: string;
       rejectName: string;
-      answer: (decision: 'allow' | 'reject' | 'cancelled') => unknown;
+      form?: ApprovalForm;
+      answer: (decision: 'allow' | 'reject' | 'cancelled', answers?: ApprovalAnswers) => unknown;
     };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -339,6 +344,42 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
    */
   extensionRequest(_method: string, _params: any): ExtensionReply | null {
     return null;
+  }
+
+  /**
+   * Whether `initialize` offers `elicitation.form`: the runtime then asks its questions through `elicitation/create`
+   * (shown as a form in the chat) instead of falling back to a text question or skipping it.
+   */
+  protected readonly formElicitation: boolean = false;
+
+  /** `initialize` clientCapabilities. Harness Team offers no file system or terminal of its own. */
+  clientCapabilities(): Record<string, unknown> {
+    return {
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+      ...(this.formElicitation ? { elicitation: { form: {} } } : {}),
+    };
+  }
+
+  /**
+   * `elicitation/create` (only when formElicitation): a form in the chat, or declined at once when it cannot be shown
+   * faithfully (a URL, a field type the chat has no input for).
+   */
+  elicitationRequest(p: any): ExtensionReply | null {
+    if (!this.formElicitation) return null;
+    const q = elicitationQuestion(p);
+    if (q) return this.questionReply(q, 'accept', 'decline');
+    const message = typeof p?.message === 'string' && p.message.trim() ? p.message.trim() : null;
+    return {
+      kind: 'answer',
+      result: { action: 'decline' },
+      activity: { title: this.t('{name} 提问（无法在聊天中显示，已拒绝）', '{name} question (cannot be shown in the chat; declined)'), detail: message },
+    };
+  }
+
+  /** A question as an approval card with its form; the runtime's own names of the two answers are shown. */
+  protected questionReply(q: AcpQuestion, allowName: string, rejectName: string): ExtensionReply {
+    return { kind: 'approval', title: this.t('{name} 有问题要问你', '{name} has a question for you'), detail: q.detail, allowName, rejectName, form: q.form, answer: q.reply };
   }
 
   /**
@@ -622,7 +663,7 @@ export class AcpSession implements AgentSession {
       {
         protocolVersion: 1,
         // Harness Team offers no file system or terminal of its own: the runtime uses its own tools.
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientCapabilities: this.adapter.clientCapabilities(),
         clientInfo: { name: 'harness-team', title: 'Harness Team', version: '0' },
       },
       timeoutMs,
@@ -1338,9 +1379,9 @@ export class AcpSession implements AgentSession {
     return blocks;
   }
 
-  respondApproval(nativeRequestId: string, decision: ApprovalDecision): ApprovalAnswer {
+  respondApproval(nativeRequestId: string, decision: ApprovalDecision, answers?: ApprovalAnswers): ApprovalAnswer {
     if (!this.turn) return { ok: false, error: NO_TURN };
-    return this.turn.respond(nativeRequestId, decision);
+    return this.turn.respond(nativeRequestId, decision, answers);
   }
 
   private onNotification(method: string, p: any) {
@@ -1450,14 +1491,16 @@ export class AcpSession implements AgentSession {
       }
     } else {
       try {
-        ext = this.adapter.extensionRequest(method, p);
+        ext = method === 'elicitation/create' ? this.adapter.elicitationRequest(p) : this.adapter.extensionRequest(method, p);
       } catch {
         ext = null;
       }
     }
     if (ext?.kind === 'approval') {
-      // Shown only for the turn running on this process; otherwise nothing may be accepted.
-      const here = method === 'session/request_permission' ? own : rpc === this.rpc;
+      // Shown only for the turn running on this process (and its session, when the request names one); otherwise
+      // nothing may be accepted.
+      const here =
+        method === 'session/request_permission' ? own : rpc === this.rpc && (typeof p?.sessionId !== 'string' || p.sessionId === this.nativeSessionId);
       if (here && this.turn && this.turn.onExtensionApproval(id, method, ext)) return;
       try {
         rpc.respond(id, ext.answer('cancelled'));
@@ -1503,7 +1546,7 @@ interface PendingPermission {
   allow: string | null;
   reject: string | null;
   /** An extension request shown as an approval (ExtensionReply 'approval'): builds its reply. */
-  answer?: (decision: 'allow' | 'reject' | 'cancelled') => unknown;
+  answer?: (decision: 'allow' | 'reject' | 'cancelled', answers?: ApprovalAnswers) => unknown;
 }
 
 /** The reply that cancels a pending request without approving anything. */
@@ -1681,7 +1724,7 @@ class AcpTurn {
     }
   }
 
-  respond(key: string, decision: ApprovalDecision): ApprovalAnswer {
+  respond(key: string, decision: ApprovalDecision, answers?: ApprovalAnswers): ApprovalAnswer {
     const p = this.pending.get(key);
     if (this.finished || !p) return { ok: false, error: REQUEST_GONE };
     if (this.signal.aborted || this.cancelling) return { ok: false, error: REQUEST_INTERRUPTED };
@@ -1689,7 +1732,7 @@ class AcpTurn {
     this.pending.delete(key);
     if (p.answer) {
       const allowed = decision === 'allow';
-      this.rpc.respond(p.id, p.answer(allowed ? 'allow' : 'reject'));
+      this.rpc.respond(p.id, p.answer(allowed ? 'allow' : 'reject', allowed ? answers : undefined));
       const native = (allowed ? p.allow : p.reject) ?? decision;
       this.emit({ type: 'approval.resolved', nativeRequestId: key, decision: native });
       return { ok: true, nativeDecision: native };
@@ -1748,6 +1791,7 @@ class AcpTurn {
         reason: null,
         detail: clip(ext.detail ? redactText(ext.detail) : null),
         options: ['allow', 'deny'],
+        ...(ext.form ? { form: ext.form } : {}),
       });
     } catch (e) {
       this.pending.delete(key);

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { L } from '../../../shared/notices.ts';
 import type { RuntimeDescriptor } from '../../../shared/protocol.ts';
 import { ENVELOPE_MARKERS } from '../team/envelope.ts';
-import type { AgentSession, RuntimeAdapter, TurnEventSink, TurnInput, TurnResult } from './types.ts';
+import type { AgentSession, RuntimeAdapter, SteerAnswer, SteerInput, TurnEventSink, TurnInput, TurnResult } from './types.ts';
 
 /**
  * Clearly-labelled MOCK runtime used only to exercise the chat UI and Core plumbing.
@@ -12,6 +12,8 @@ import type { AgentSession, RuntimeAdapter, TurnEventSink, TurnInput, TurnResult
  * tests, `mock-say: <text>` in a non-quoted line of a handled message makes it append `<text>` verbatim (which may
  * @mention, and may itself contain a further `mock-say:` for chains). A fullwidth "＠" in that text becomes "@", so a
  * test can script a chain without the user's own message mentioning the later agents.
+ *
+ * A message added to a running turn (steer) is quoted the same way, after what was streamed so far.
  */
 export class MockAdapter implements RuntimeAdapter {
   readonly kind = 'mock' as const;
@@ -36,7 +38,7 @@ export class MockAdapter implements RuntimeAdapter {
         nativeApprovals: false,
         interrupt: true,
         resume: false,
-        steer: false,
+        steer: true,
         teamMcp: false,
         standingInstructions: false,
       },
@@ -51,6 +53,8 @@ export class MockAdapter implements RuntimeAdapter {
 class MockSession implements AgentSession {
   readonly nativeSessionId: string;
   private readonly chunkDelayMs: number;
+  /** Chunks of the reply still to stream (the running turn); null between turns. */
+  private chunks: string[] | null = null;
 
   constructor(id: string, chunkDelayMs: number) {
     this.nativeSessionId = id;
@@ -74,18 +78,36 @@ class MockSession implements AgentSession {
       '```text\nruntime: mock\nsession: ' +
       this.nativeSessionId +
       '\n```';
-    const chunks = reply.match(/[\s\S]{1,12}/g) ?? [];
-    for (const chunk of chunks) {
-      if (signal.aborted) return { status: 'interrupted' };
-      await sleep(this.chunkDelayMs, signal);
-      if (signal.aborted) return { status: 'interrupted' };
-      sink({ type: 'text.delta', text: chunk });
+    const chunks = split(reply);
+    this.chunks = chunks;
+    try {
+      while (chunks.length) {
+        if (signal.aborted) return { status: 'interrupted' };
+        await sleep(this.chunkDelayMs, signal);
+        if (signal.aborted) return { status: 'interrupted' };
+        sink({ type: 'text.delta', text: chunks.shift()! });
+      }
+      return { status: 'completed' };
+    } finally {
+      this.chunks = null;
     }
-    return { status: 'completed' };
+  }
+
+  async steer(input: SteerInput): Promise<SteerAnswer> {
+    if (!this.chunks?.length) return { ok: false, error: 'no mock turn running' };
+    const quoted = input.text
+      .split('\n')
+      .slice(0, 6)
+      .map((l) => `> ${l.replaceAll('@', '＠')}`)
+      .join('\n');
+    this.chunks.push(...split(`\n\n**[Mock 插话]**\n\n${quoted}`));
+    return { ok: true };
   }
 
   async close(): Promise<void> {}
 }
+
+const split = (text: string) => text.match(/[\s\S]{1,12}/g) ?? [];
 
 /** The "messages to handle" part of a Core envelope (whole text if it is not an envelope). */
 function triggerSection(text: string): string {

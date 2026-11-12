@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode, type Ref } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode, type Ref } from 'react';
 import { AVATAR_DEFAULT_KINDS, chatAvatarKey, type AvatarDefaultKey } from '../../../shared/protocol.ts';
 import { api } from '../api.ts';
 import type { NotifyState } from '../attention.ts';
@@ -143,7 +143,47 @@ export function SettingsDialog(props: {
           {props.notify === 'unsupported' && <div className="hint">{t('settings.notifyUnsupported')}</div>}
         </div>
       </section>
+      <KeepAwakeSetting />
     </Dialog>
+  );
+}
+
+/** Desktop app only: the shell holds off idle sleep while members run turns (off unless turned on). */
+function KeepAwakeSetting() {
+  const t = useT();
+  const desktop = window.harnessDesktop;
+  const [on, setOn] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    desktop?.getKeepAwake?.().then((v) => live && setOn(v), () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [desktop]);
+  if (!desktop?.getKeepAwake || !desktop.setKeepAwake || on === null) return null;
+  const set = desktop.setKeepAwake;
+  return (
+    <section className="settings-row">
+      <div className="settings-label">{t('settings.power')}</div>
+      <div>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={on}
+            disabled={busy}
+            onChange={(e) => {
+              const want = e.target.checked;
+              setBusy(true);
+              set(want)
+                .then((v) => setOn(v ?? on), () => undefined)
+                .finally(() => setBusy(false));
+            }}
+          />
+          {t('settings.keepAwake')}
+        </label>
+      </div>
+    </section>
   );
 }
 

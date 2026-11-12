@@ -28,6 +28,10 @@ const T = {
   'word.user': { zh: '用户', en: 'You' },
   'word.resume': { zh: '恢复', en: 'resumed' },
   'word.create': { zh: '新建', en: 'created' },
+  'word.on': { zh: '开', en: 'on' },
+  'word.off': { zh: '关', en: 'off' },
+  // A Claude Code member's permission mode, with its Claude in Chrome switch (Agent.chrome) next to it.
+  'perm.withChrome': { zh: '{perm} · Claude in Chrome：{state}', en: '{perm} · Claude in Chrome: {state}' },
   'billing.metered_api': { zh: '按量计费', en: 'metered API' },
 
   // ---- rooms and collaboration ----

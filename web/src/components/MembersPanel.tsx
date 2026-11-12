@@ -39,7 +39,7 @@ import { HelpTip } from './HelpTip.tsx';
 import { Icon } from './Icon.tsx';
 import { groupModels } from '../model-groups.ts';
 import { AgentAvatar, AvatarDefaultsContext, MeteredBadge, RUNTIME_NAME, RuntimeBadge } from './RuntimeBadge.tsx';
-import { ChatModelPicker, ChatSettingsFields, cachedChatModel, chatDefaults, usableProviders, useChatModel, useChatProviders } from './ChatProviders.tsx';
+import { ChatModelPicker, ChatSettingsFields, cachedChatModel, chatDefaults, forModel, newChatDefaults, usableProviders, useChatModel, useChatProviders } from './ChatProviders.tsx';
 import { WorkspacePicker } from './WorkspacePicker.tsx';
 
 // ---- model catalog (always discovered from the runtime through the Core; never a list in the UI) ----
@@ -1256,13 +1256,15 @@ function NewAgentForm(props: {
   const userPicked = useRef(false);
   const [cfg, setCfg] = useState({ model: '', effort: '' });
   /** Chat members: the member's own settings. */
-  const [chatSettings, setChatSettings] = useState(chatDefaults);
+  const [chatSettings, setChatSettings] = useState(newChatDefaults);
   const chatModel = useChatModel(chatCfg.providerId, chatCfg.model);
   /** '' = follow the user's own runtime settings. */
   const [perm, setPerm] = useState('');
   /** Antigravity only. Full only after the warning was confirmed in this form. */
   const [collab, setCollab] = useState<'restricted' | 'full'>('restricted');
   const [language, setLanguage] = useState('');
+  /** Claude Code only: ticked for a new member. */
+  const [chrome, setChrome] = useState(true);
   const [askingCollab, setAskingCollab] = useState(false);
   // New members work in the room's project folder unless the user picks another one.
   const [workspace, setWorkspace] = useState(props.room.projectDir ?? '');
@@ -1404,7 +1406,7 @@ function NewAgentForm(props: {
                   providerId: chatCfg.providerId,
                   model: chatCfg.model,
                   ...(chatCfg.effort ? { effort: chatCfg.effort } : {}),
-                  chat: { ...chatSettings, webSearch: chatSettings.webSearch && !!chatModel?.webSearch },
+                  chat: forModel(chatSettings, chatModel),
                 }
               : {
                   ...(cfg.model ? { model: cfg.model } : {}),
@@ -1414,6 +1416,7 @@ function NewAgentForm(props: {
             ...(runtimeKind === 'antigravity' && collab === 'full' ? { collabMode: 'full' as const, acknowledgeCollabRisk: COLLAB_WARNING_VERSION } : {}),
             ...(needsWorkspace ? { workspace: workspace.trim(), ...(worktree ? { worktree: true } : {}) } : {}),
             ...(asLanguage(language) ? { language: asLanguage(language) } : {}),
+            ...(runtimeKind === 'claude' ? { chrome } : {}),
           });
           await api.addMember(props.room.id, agent.id, props.defaultReply);
           props.onAdded(agent);
@@ -1466,6 +1469,7 @@ function NewAgentForm(props: {
       ) : (
         !runtime?.isMock && <ModelEffortFields runtimeKind={runtimeKind} generation={detected} model={cfg.model} effort={cfg.effort} onChange={setCfg} onMetered={setModelMetered} />
       )}
+      {runtimeKind === 'claude' && <ChromeCheck checked={chrome} onChange={setChrome} />}
       {needsWorkspace && <WorkspacePicker value={workspace} onChange={setWorkspace} />}
       <details className="form-more">
         <summary>{t('add.more')}</summary>
@@ -1624,6 +1628,17 @@ function LanguageField(props: { id: string; value: string; roomLanguage: AgentLa
 
 const asLanguage = (v: string): AgentLanguage | null => (v === 'zh' || v === 'en' ? v : null);
 
+/** Claude Code members: start with `--chrome` (Claude in Chrome's browser tools, each call still asks for approval). */
+function ChromeCheck(props: { checked: boolean; onChange: (on: boolean) => void }) {
+  const { t } = usePrefs();
+  return (
+    <label className="check">
+      <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.target.checked)} />
+      <span>{t('add.chrome')}</span>
+    </label>
+  );
+}
+
 function AgentDialog(props: {
   agent: AgentWithStatus;
   /** The room the member is in (null when opened for an agent outside it). */
@@ -1648,6 +1663,7 @@ function AgentDialog(props: {
   const [perm, setPerm] = useState<string>(a.permissionMode ?? '');
   const [avatar, setAvatar] = useState<string | null>(a.avatar);
   const [language, setLanguage] = useState<string>(a.language ?? '');
+  const [chrome, setChrome] = useState(a.chrome === true);
   const [defaultReply, setDefaultReply] = useState(props.defaultReply);
   const [detail, setDetail] = useState<AgentDetailResponse | null>(null);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1660,7 +1676,8 @@ function AgentDialog(props: {
   const modelChanged = cfg.model !== (a.model ?? '') || cfg.effort !== (a.effort ?? '');
   const permChanged = perm !== (a.permissionMode ?? '');
   const chatChanged = isChat && JSON.stringify(chatSettings) !== JSON.stringify(a.chat ?? chatDefaults());
-  const configChanged = modelChanged || permChanged || chatChanged;
+  const chromeChanged = a.runtimeKind === 'claude' && chrome !== (a.chrome === true);
+  const configChanged = modelChanged || permChanged || chatChanged || chromeChanged;
   const avatarChanged = avatar !== a.avatar;
   const languageChanged = language !== (a.language ?? '');
   const defaultChanged = !!props.roomId && defaultReply !== props.defaultReply;
@@ -1682,6 +1699,7 @@ function AgentDialog(props: {
             ...(modelChanged ? { model: cfg.model || null, effort: cfg.effort || null } : {}),
             ...(permChanged ? { permissionMode: (perm || null) as PermissionMode | null, ...permissionRiskAck(perm) } : {}),
             ...(chatChanged ? { chat: chatSettings } : {}),
+            ...(chromeChanged ? { chrome } : {}),
             ...(avatarChanged ? { avatar } : {}),
             ...(languageChanged ? { language: asLanguage(language) } : {}),
           })
@@ -1755,6 +1773,7 @@ function AgentDialog(props: {
           <>
             <ModelEffortFields runtimeKind={a.runtimeKind} cwd={a.workspace} model={cfg.model} effort={cfg.effort} onChange={setCfg} />
             <PermissionField runtimeKind={a.runtimeKind} cwd={a.workspace} handle={a.handle} value={perm} onChange={setPerm} />
+            {a.runtimeKind === 'claude' && <ChromeCheck checked={chrome} onChange={setChrome} />}
             <CollabModeField agent={a} onResult={setResult} />
           </>
         )}

@@ -8,7 +8,10 @@ import type {
   ActivityKind,
   AgentLanguage,
   Agent,
+  ApprovalAnswers,
   ApprovalDecision,
+  ApprovalField,
+  ApprovalForm,
   RuntimeCommand,
   RuntimeDescriptor,
   RuntimeModelCatalog,
@@ -49,6 +52,7 @@ import {
 } from '../types.ts';
 import { type ClaudeAuthSummary, claudeLogin, type ClaudeLogin, nativeClaudeEnv } from './detect.ts';
 import { StreamJsonProcess } from './process.ts';
+import { choiceTexts, elicitationContent, fieldsFromSchema } from '../forms.ts';
 
 /**
  * Claude Code runtime through the user's own, unmodified `claude` CLI (backend "claude-native-cli").
@@ -104,7 +108,8 @@ const CLAUDE_COMMANDS: RuntimeCommand[] = [
 const FORBIDDEN_FLAGS = /^--(bare|dangerously-skip-permissions|allow-dangerously-skip-permissions|continue|fallback-model)$|^-c$|bypassPermissions/;
 
 /**
- * `--model` / `--effort` / `--permission-mode` for an explicit per-agent choice; nothing for "follow Claude Code's
+ * `--model` / `--effort` / `--permission-mode` for an explicit per-agent choice, `--chrome` when the member has Claude in
+ * Chrome on; nothing for "follow Claude Code's
  * default". Only the modes in PERMISSION_MODES.claude are ever passed; bypassPermissions only as this mode value, when
  * the user chose it after the risk warning (the Core checks that), never as --dangerously-skip-permissions.
  */
@@ -112,6 +117,7 @@ export function modelArgs(cfg: ModelConfig | null | undefined): string[] {
   const out: string[] = [];
   if (cfg?.model) out.push('--model', cfg.model);
   if (cfg?.effort) out.push('--effort', cfg.effort);
+  if (cfg?.chrome) out.push('--chrome');
   if (cfg?.permissionMode) {
     if (!PERMISSION_MODES.claude.includes(cfg.permissionMode)) {
       throw new NoticeError(L('内部错误：拒绝使用权限模式 {mode}', 'Internal error: refusing the permission mode {mode}', { mode: cfg.permissionMode }));
@@ -122,7 +128,10 @@ export function modelArgs(cfg: ModelConfig | null | undefined): string[] {
 }
 
 const sameConfig = (a: ModelConfig, b: ModelConfig) =>
-  (a.model ?? null) === (b.model ?? null) && (a.effort ?? null) === (b.effort ?? null) && (a.permissionMode ?? null) === (b.permissionMode ?? null);
+  (a.model ?? null) === (b.model ?? null) &&
+  (a.effort ?? null) === (b.effort ?? null) &&
+  (a.permissionMode ?? null) === (b.permissionMode ?? null) &&
+  !!a.chrome === !!b.chrome;
 
 /** Claude Code's own name for a mode: `manual` is the CLI's alias of its internal "default". */
 const nativeMode = (m: PermissionMode) => (m === 'manual' ? 'default' : m);
@@ -350,7 +359,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
       resumeId ?? randomUUID(),
       !!resumeId,
       args.teamMcp,
-      { model: args.agent.model, effort: args.agent.effort, permissionMode: args.agent.permissionMode },
+      { model: args.agent.model, effort: args.agent.effort, permissionMode: args.agent.permissionMode, ...(args.agent.chrome ? { chrome: true } : {}) },
       args.instructions ?? null,
       args.readableDirs ?? [],
     );
@@ -812,7 +821,14 @@ class ClaudeSession implements AgentSession {
       }
       this.unconfirmedStop = null;
     }
-    if (input.config) this.config = { model: input.config.model ?? null, effort: input.config.effort ?? null, permissionMode: input.config.permissionMode ?? null };
+    if (input.config) {
+      this.config = {
+        model: input.config.model ?? null,
+        effort: input.config.effort ?? null,
+        permissionMode: input.config.permissionMode ?? null,
+        ...(input.config.chrome ? { chrome: true } : {}),
+      };
+    }
     // A process whose mode moved away from the chosen one during a turn (e.g. leaving plan mode after you approved the
     // plan) is restarted with the chosen mode, like a changed setting.
     const drifted = !!(
@@ -833,7 +849,10 @@ class ClaudeSession implements AgentSession {
           N('claude.restartedConfig', {
             model: this.config.model ?? N('word.followDefault'),
             effort: this.config.effort ?? N('word.default'),
-            perm: N(this.config.permissionMode ? `perm.${this.config.permissionMode}` : 'perm.follow'),
+            perm: N('perm.withChrome', {
+              perm: N(this.config.permissionMode ? `perm.${this.config.permissionMode}` : 'perm.follow'),
+              state: N(this.config.chrome ? 'word.on' : 'word.off'),
+            }),
             how: N(this.persisted ? 'word.resume' : 'word.create'),
             id: this.nativeSessionId,
           }),
@@ -864,9 +883,9 @@ class ClaudeSession implements AgentSession {
     }
   }
 
-  respondApproval(nativeRequestId: string, decision: ApprovalDecision): ApprovalAnswer {
+  respondApproval(nativeRequestId: string, decision: ApprovalDecision, answers?: ApprovalAnswers): ApprovalAnswer {
     if (!this.turn) return { ok: false, error: L('该成员当前没有进行中的回合，请求已失效', 'This member has no turn running; the request is no longer valid') };
-    return this.turn.respond(nativeRequestId, decision);
+    return this.turn.respond(nativeRequestId, decision, answers);
   }
 
   private onMessage(msg: any) {
@@ -874,6 +893,7 @@ class ClaudeSession implements AgentSession {
     // Between turns nothing may be granted: deny stray permission prompts, refuse other host requests.
     if (msg?.type === 'control_request') {
       if (msg.request?.subtype === 'can_use_tool') this.proc?.respond(msg.request_id, { behavior: 'deny', message: denyText('noTurn', this.language()) });
+      else if (msg.request?.subtype === 'elicitation') this.proc?.respond(msg.request_id, { action: 'cancel' });
       else this.proc?.respondError(msg.request_id, `Harness Team 不支持 ${msg.request?.subtype}`);
     }
   }
@@ -1051,8 +1071,8 @@ class ClaudeTurn {
   private interruptTimer: NodeJS.Timeout | null = null;
   /** Set once an unconfirmed interrupt escalated to a forced stop; all further output of this process is ignored. */
   private forcing = false;
-  /** request_id -> the tool request as Claude Code sent it (input is echoed back unchanged on allow). */
-  private readonly pending = new Map<string, { toolUseId: string | null; toolName: string; input: unknown; session: ClaudePermissionUpdate[] }>();
+  /** request_id -> the tool request (input is echoed back unchanged on allow) or MCP elicitation as Claude Code sent it. */
+  private readonly pending = new Map<string, ClaudePending>();
   private readonly tools = new Map<string, ToolState>();
   private curMsgId = '';
   private readonly streamIdx = new Map<number, string>();
@@ -1119,8 +1139,8 @@ class ClaudeTurn {
 
   private end(r: TurnResult) {
     if (this.finished) return;
-    for (const [requestId] of this.pending) {
-      this.proc.respond(requestId, { behavior: 'deny', message: denyText('turnEnded', this.session.language()) });
+    for (const [requestId, p] of this.pending) {
+      this.proc.respond(requestId, p.kind === 'elicitation' ? { action: 'cancel' } : { behavior: 'deny', message: denyText('turnEnded', this.session.language()) });
       this.sink({ type: 'approval.resolved', nativeRequestId: requestId, decision: 'cancelled' });
     }
     this.pending.clear();
@@ -1186,8 +1206,8 @@ class ClaudeTurn {
     } catch (e) {
       this.emit(noticeEvent(N('claude.interruptFailed', { error: (e as Error).message })));
     }
-    for (const [requestId] of this.pending) {
-      this.proc.respond(requestId, { behavior: 'deny', message: denyText('interrupted', this.session.language()) });
+    for (const [requestId, p] of this.pending) {
+      this.proc.respond(requestId, p.kind === 'elicitation' ? { action: 'cancel' } : { behavior: 'deny', message: denyText('interrupted', this.session.language()) });
       this.emit({ type: 'approval.resolved', nativeRequestId: requestId, decision: 'cancelled' });
     }
     this.pending.clear();
@@ -1435,12 +1455,30 @@ class ClaudeTurn {
   }
 
   /** The user's decision for one pending permission prompt of this turn, sent on its exact request_id. */
-  respond(requestId: string, decision: ApprovalDecision): ApprovalAnswer {
+  respond(requestId: string, decision: ApprovalDecision, answers: ApprovalAnswers = {}): ApprovalAnswer {
     const p = this.pending.get(requestId);
     if (this.finished || this.forcing || !p) return { ok: false, error: REQUEST_GONE };
     if (this.interruptRequested || this.signal.aborted) return { ok: false, error: REQUEST_INTERRUPTED };
-    if (!claudeApprovalOptions(p.toolName, p.session).includes(decision)) return { ok: false, error: unsupportedDecision(p.toolName, decision) };
+    if (p.kind === 'elicitation') {
+      if (decision !== 'deny' && !(decision === 'allow' && p.form)) return { ok: false, error: unsupportedDecision('elicitation', decision) };
+      this.pending.delete(requestId);
+      if (decision === 'deny' || !p.form) {
+        this.proc.respond(requestId, { action: 'decline' });
+        return { ok: true, nativeDecision: 'decline' };
+      }
+      this.proc.respond(requestId, p.form.url ? { action: 'accept' } : { action: 'accept', content: elicitationContent(p.form, answers) });
+      return { ok: true, nativeDecision: 'accept' };
+    }
+    if (!claudeApprovalOptions(p.toolName, p.session, p.form).includes(decision)) return { ok: false, error: unsupportedDecision(p.toolName, decision) };
     this.pending.delete(requestId);
+    if (p.form && decision === 'allow') {
+      // AskUserQuestion: the answers go back in the tool input, keyed by the question text (several choices: "a, b").
+      const form = p.form;
+      const questions = askQuestions(p.input);
+      const answered = Object.fromEntries(form.fields.map((f, i) => [questions[i]?.question ?? f.label, choiceTexts(f, answers[f.id]).join(', ')]));
+      this.proc.respond(requestId, { behavior: 'allow', updatedInput: { ...(p.input as object), answers: answered } });
+      return { ok: true, nativeDecision: 'allow (answered)' };
+    }
     if (decision === 'allow_session') {
       this.proc.respond(requestId, { behavior: 'allow', updatedInput: p.input, updatedPermissions: p.session });
       return { ok: true, nativeDecision: 'allow (session rules)' };
@@ -1457,6 +1495,7 @@ class ClaudeTurn {
   private onControlRequest(msg: any) {
     const req = msg.request ?? {};
     const requestId = String(msg.request_id);
+    if (req.subtype === 'elicitation') return this.onElicitation(requestId, req);
     if (req.subtype !== 'can_use_tool') {
       this.proc.respondError(requestId, `Harness Team 不支持 ${req.subtype}`);
       return;
@@ -1468,7 +1507,8 @@ class ClaudeTurn {
     const toolUseId = req.tool_use_id ? String(req.tool_use_id) : null;
     const toolName = String(req.tool_name);
     const session = sessionPermissionUpdates(req.permission_suggestions ?? req.suggestions);
-    this.pending.set(requestId, { toolUseId, toolName, input: req.input ?? {}, session });
+    const form = toolName === 'AskUserQuestion' ? askUserQuestionForm(req.input) : null;
+    this.pending.set(requestId, { kind: 'tool', toolUseId, toolName, input: req.input ?? {}, session, form });
     const mapped = mapTool(toolName, req.input ?? {}, this.session.cwd);
     this.emit({
       type: 'approval.requested',
@@ -1478,12 +1518,39 @@ class ClaudeTurn {
       ...titled(N('approval.useTool', { tool: String(req.display_name ?? req.tool_name), title: mapped.label ?? mapped.title })),
       reason: req.decision_reason ? String(req.decision_reason) : null,
       // The tool's own description is often the same text as the mapped detail (Bash `description`): show it once.
-      detail:
-        [req.description && !(mapped.detail ?? '').includes(String(req.description)) ? String(req.description) : null, mapped.detail]
+      // Questions shown as a form need no copy of their input.
+      detail: form
+        ? null
+        : [req.description && !(mapped.detail ?? '').includes(String(req.description)) ? String(req.description) : null, mapped.detail]
           .filter(Boolean)
           .join('\n') || null,
-      options: claudeApprovalOptions(toolName, session),
+      options: claudeApprovalOptions(toolName, session, form),
       scope: sessionScope(session),
+      ...(form ? { form } : {}),
+    });
+  }
+
+  /** An MCP server asks the user for input (Claude Code passes it to the host): a form, or a page to open. */
+  private onElicitation(requestId: string, req: any) {
+    if (this.interruptRequested || this.signal.aborted) {
+      this.proc.respond(requestId, { action: 'cancel' });
+      return;
+    }
+    const url = typeof req.url === 'string' && /^https?:\/\//i.test(req.url) ? req.url : null;
+    const fields = req.mode === 'url' ? (url ? [] : null) : fieldsFromSchema(req.requested_schema ?? req.requestedSchema);
+    const form: ApprovalForm | null = fields ? { fields, ...(req.mode === 'url' ? { url } : {}) } : null;
+    this.pending.set(requestId, { kind: 'elicitation', form });
+    const server = String(req.display_name ?? req.mcp_server_name ?? '?');
+    this.emit({
+      type: 'approval.requested',
+      nativeRequestId: requestId,
+      nativeMethod: 'elicitation',
+      itemId: null,
+      ...titled(N('approval.mcpInput', { server })),
+      reason: null,
+      detail: [req.title, req.message, req.description, url].filter((v) => typeof v === 'string' && v).join('\n') || null,
+      options: form ? ['allow', 'deny'] : ['deny'],
+      ...(form ? { form } : {}),
     });
   }
 
@@ -1601,6 +1668,45 @@ export function claudeUsage(msg: any, fallbackModel: string | null): TurnUsage[]
   return row.input + row.cacheRead + row.cacheWrite + row.output > 0 ? [row] : null;
 }
 
+type ClaudePending =
+  | { kind: 'tool'; toolUseId: string | null; toolName: string; input: unknown; session: ClaudePermissionUpdate[]; form: ApprovalForm | null }
+  | { kind: 'elicitation'; form: ApprovalForm | null };
+
+type AskQuestion = { question: string; header: string | null; options: { label: string; description: string | null }[]; multiSelect: boolean };
+
+function askQuestions(input: unknown): AskQuestion[] {
+  const qs = (input as any)?.questions;
+  if (!Array.isArray(qs)) return [];
+  return qs.map((q: any) => ({
+    question: typeof q?.question === 'string' ? q.question : '',
+    header: typeof q?.header === 'string' && q.header ? q.header : null,
+    options: Array.isArray(q?.options)
+      ? q.options.filter((o: any) => typeof o?.label === 'string' && o.label).map((o: any) => ({ label: o.label, description: typeof o.description === 'string' ? o.description : null }))
+      : [],
+    multiSelect: q?.multiSelect === true,
+  }));
+}
+
+/**
+ * AskUserQuestion as a form: one choice per question, with the option to type an answer instead (Claude Code's own
+ * prompt always offers that). null when the questions are malformed (the request is then refuse-only).
+ */
+export function askUserQuestionForm(input: unknown): ApprovalForm | null {
+  const qs = askQuestions(input);
+  if (!qs.length || qs.some((q) => !q.question || !q.options.length) || new Set(qs.map((q) => q.question)).size !== qs.length) return null;
+  const fields: ApprovalField[] = qs.map((q, i) => ({
+    kind: 'choice',
+    id: `q${i}`,
+    label: q.question,
+    header: q.header,
+    options: q.options.map((o) => ({ value: o.label, label: o.label, description: o.description })),
+    multiple: q.multiSelect,
+    other: true,
+    required: true,
+  }));
+  return { fields };
+}
+
 /**
  * Claude Code ignores a project's `.claude/settings.json` permissions.allow rules in `-p` mode until the user has
  * trusted that folder interactively. Harness Team never trusts folders on the user's behalf; it only says so.
@@ -1608,12 +1714,12 @@ export function claudeUsage(msg: any, fallbackModel: string | null): TurnUsage[]
 /**
  * Decisions offered for a Claude Code permission prompt. "allow" answers this one request with the original input;
  * "allow_session" also sends Claude Code's own suggested rules for the session, offered only when there are some.
- * AskUserQuestion expects the user's own answers, so it can only be refused from the group chat. ExitPlanMode (the
+ * AskUserQuestion is answered with the user's own answers (a form; refuse-only when its questions are malformed). ExitPlanMode (the
  * plan sign-off of plan mode) can be approved once: the original input is the plan itself, and what Claude Code does
  * next still goes through its own prompts.
  */
-export function claudeApprovalOptions(toolName: string, session: ClaudePermissionUpdate[] = []): ApprovalDecision[] {
-  if (toolName === 'AskUserQuestion') return ['deny'];
+export function claudeApprovalOptions(toolName: string, session: ClaudePermissionUpdate[] = [], form: ApprovalForm | null = null): ApprovalDecision[] {
+  if (toolName === 'AskUserQuestion') return form ? ['allow', 'deny'] : ['deny'];
   return sessionScope(session) && toolName !== 'ExitPlanMode' ? ['allow', 'allow_session', 'deny'] : ['allow', 'deny'];
 }
 

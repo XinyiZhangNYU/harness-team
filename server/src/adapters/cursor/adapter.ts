@@ -4,6 +4,7 @@ import { L, type Localized, type NoticeText } from '../../../../shared/notices.t
 import type { PermissionMode, RuntimeBilling } from '../../../../shared/protocol.ts';
 import { PERMISSION_MODES } from '../../../../shared/protocol.ts';
 import { AcpAdapter, type AcpAdapterOptions, type ExtensionReply } from '../acp/adapter.ts';
+import { cursorQuestion } from '../acp/questions.ts';
 import { type CliLaunch, cliFromPath, cliVersion, extraBinDirs, findCli, pathDirs } from '../cli-path.ts';
 
 /**
@@ -16,8 +17,9 @@ import { type CliLaunch, cliFromPath, cliVersion, extraBinDirs, findCli, pathDir
  * usage only if the user enabled it in Cursor).
  * The executable is looked up as `cursor-agent`, not `agent`: that generic name may belong to another program.
  * Cursor's blocking extension requests: `cursor/create_plan` is an approval card in the chat (accepted only on the
- * user's click, otherwise rejected / cancelled); `cursor/ask_question` is answered "skipped" (the question is shown in
- * the activity list and the model is told to ask in its reply).
+ * user's click, otherwise rejected / cancelled); `cursor/ask_question` is a form in the chat, answered only with the
+ * options the user picks (refusing is Cursor's "skipped"). A question that cannot be shown is skipped and the model is
+ * told to ask in its reply.
  */
 
 export interface CursorDetection {
@@ -195,6 +197,8 @@ export class CursorAdapter extends AcpAdapter<CursorAdapterOptions> {
       };
     }
     if (method === 'cursor/ask_question') {
+      const q = cursorQuestion(p);
+      if (q) return this.questionReply(q, 'answered', 'skipped');
       return {
         kind: 'answer',
         result: {

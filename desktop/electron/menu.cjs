@@ -203,7 +203,7 @@ function diagnosticsText({ appVersion, packaged, os, versions, runtimes, chatPro
       if (r.billing) parts.push(`billing: ${r.billing}`);
       // Chat members also need a model provider (Settings → Model providers) before one can be added.
       if (r.kind === 'chat' && r.available && typeof chatProviders === 'number')
-        parts.push(chatProviders ? `model providers ready: ${chatProviders}` : 'no model provider set up yet, so no Chat member can be added');
+        parts.push(chatProviders ? `model providers ready: ${chatProviders}` : 'no model provider set up yet, so no API member can be added');
       if (!r.available && problem) parts.push(String(problem));
       lines.push(`- ${r.label ?? r.kind}: ${parts.join(', ')}`);
     }

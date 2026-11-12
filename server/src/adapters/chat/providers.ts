@@ -256,7 +256,7 @@ export class ChatProviders {
   /** The provider and model a chat member calls, or why it cannot run now. */
   resolve(providerId: string | null, modelId: string | null): ResolvedChatModel | { error: Localized } {
     const provider = providerId ? this.get(providerId) : undefined;
-    if (!provider) return { error: L('这个聊天成员的供应商已不存在', 'The provider of this chat member no longer exists') };
+    if (!provider) return { error: L('这个 API 成员的供应商已不存在', 'The provider of this API member no longer exists') };
     if (provider.legacy) return { error: L('供应商「{p}」需要在设置里重新填写格式和 Key', 'The provider “{p}” needs its format and key again in Settings', { p: provider.label }) };
     if (!provider.enabled) return { error: L('供应商「{p}」已停用', 'The provider “{p}” is turned off', { p: provider.label }) };
     const model = provider.models.find((m) => m.id === modelId);

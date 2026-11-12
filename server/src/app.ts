@@ -6,7 +6,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { z } from 'zod';
-import type { ServerEvent } from '../../shared/protocol.ts';
+import type { PostMessageResponse, ServerEvent } from '../../shared/protocol.ts';
 import { AntigravityAdapter, type AntigravityAdapterOptions } from './adapters/antigravity/adapter.ts';
 import { DshAdapter, type DshAdapterOptions } from './adapters/dsh/adapter.ts';
 import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode/adapter.ts';
@@ -40,7 +40,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.12.2';
+export const SERVER_VERSION = '0.12.3';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -154,10 +154,11 @@ const CreateAgent = z.object({
   collabMode: z.enum(['restricted', 'full']).optional(),
   acknowledgeCollabRisk: z.string().max(100).optional(),
   language: AgentLanguageSchema.nullable().optional(),
+  chrome: z.boolean().optional(),
   providerId: z.string().max(100).nullable().optional(),
   chat: z.lazy(() => ChatMemberSchema).optional(),
 });
-/** Only display name / model / effort / permission mode / avatar / language are editable. Strict: handle, runtime or workspace in the body is refused. */
+/** Only display name / model / effort / permission mode / avatar / language / Claude in Chrome are editable. Strict: handle, runtime or workspace in the body is refused. */
 const UpdateAgent = z
   .object({
     displayName: z.string().max(200).optional(),
@@ -169,6 +170,7 @@ const UpdateAgent = z
     collabMode: z.enum(['restricted', 'full']).optional(),
     acknowledgeCollabRisk: z.string().max(100).optional(),
     language: AgentLanguageSchema.nullable().optional(),
+    chrome: z.boolean().optional(),
     chat: z.lazy(() => ChatMemberSchema).optional(),
   })
   .strict();
@@ -210,12 +212,13 @@ const SetAvatarDefault = z.object({ avatar: z.string().max(AGENT_AVATAR_MAX).reg
 const AddMember = z.object({ agentId: z.string(), defaultReply: z.boolean().optional() });
 const UpdateMember = z.object({ defaultReply: z.boolean() });
 const ReorderMembers = z.object({ agentIds: z.array(z.string()).max(1000) }).strict();
-const DecideApproval = z.object({ decision: z.enum(['allow', 'allow_session', 'allow_prefix', 'allow_all_edits', 'deny']) });
+const DecideApproval = z.object({ decision: z.enum(['allow', 'allow_session', 'allow_prefix', 'allow_all_edits', 'deny']), answers: z.record(z.string(), z.unknown()).optional() });
 const ChooseSession = z.object({ choice: z.enum(['restore', 'retry', 'new']) });
 const PostMessage = z.object({
   body: z.string(),
   clientMessageId: z.string(),
   attachmentIds: z.array(z.string().max(100)).max(ATTACHMENT_LIMITS.perMessage).optional(),
+  steer: z.boolean().optional(),
 });
 const UpdateRoom = z.object({
   name: z.string().max(200).optional(),
@@ -225,6 +228,7 @@ const UpdateRoom = z.object({
   pinned: z.boolean().optional(),
   archived: z.boolean().optional(),
   agentLanguage: AgentLanguageSchema.optional(),
+  parallelInFolder: z.boolean().optional(),
 });
 const CreateTask = z.object({ title: z.string(), assigneeId: z.string().nullable().optional() });
 const UpdateTask = z.object({
@@ -514,7 +518,8 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       if (method === 'POST') {
         const body = PostMessage.parse(await readJson(req));
         await core.prepareMessage(b, body.body);
-        return sendJson(res, 201, { message: core.postUserMessage(b, body.body, body.clientMessageId, body.attachmentIds ?? []) });
+        const sent = core.sendUserMessage(b, body.body, body.clientMessageId, body.attachmentIds ?? [], body.steer ?? false);
+        return sendJson(res, 201, { message: sent.message, ...(body.steer ? { queued: sent.queued } : {}) } satisfies PostMessageResponse);
       }
     }
     if (a === 'rooms' && b && c === 'attachments' && !d && method === 'POST') {
@@ -685,7 +690,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     if (a === 'approvals' && b && !c && method === 'POST') {
       // The local user's decision on a native approval request (cookie-authenticated user API only).
       const body = DecideApproval.parse(await readJson(req));
-      return sendJson(res, 200, { message: core.decideApproval(b, body.decision) });
+      return sendJson(res, 200, { message: core.decideApproval(b, body.decision, body.answers) });
     }
     if (a === 'session-choices' && b && !c && method === 'POST') {
       // The user's answer to "a member's session could not be resumed" (restore / retry / new session).

@@ -728,6 +728,12 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE avatar_defaults_v29 RENAME TO avatar_defaults;
     `,
   },
+  {
+    version: 30,
+    name: 'room parallel in shared folder',
+    // 1: members of this chat that share a working folder do not wait for each other.
+    sql: `ALTER TABLE rooms ADD COLUMN parallel_in_folder INTEGER NOT NULL DEFAULT 0 CHECK (parallel_in_folder IN (0,1));`,
+  },
 ];
 
 /**

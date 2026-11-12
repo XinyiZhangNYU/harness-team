@@ -23,6 +23,9 @@ interface Window {
     showMenu?(x: number, y: number): void;
     /** Colors of the window buttons drawn over the title bar, as #rrggbb. */
     setTitleBarColors?(color: string, symbolColor: string): void;
+    /** Settings → keep the computer awake while members work (absent in older shells). */
+    getKeepAwake?(): Promise<boolean | null>;
+    setKeepAwake?(on: boolean): Promise<boolean | null>;
     /** In-app updates (installed Windows app; absent in older shells, null state where it does not update itself). */
     getUpdate?(): Promise<DesktopUpdate | null>;
     onUpdate?(listener: (state: DesktopUpdate) => void): () => void;

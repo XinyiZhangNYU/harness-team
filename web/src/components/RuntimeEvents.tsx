@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ActivityKind, AgentWithStatus, ApprovalDecision, Message, SessionChoiceOption } from '../../../shared/protocol.ts';
+import type { ActivityKind, AgentWithStatus, ApprovalAnswers, ApprovalAnswerValue, ApprovalDecision, ApprovalField, ApprovalForm, Message, SessionChoiceOption } from '../../../shared/protocol.ts';
 import { api } from '../api.ts';
 import { readableCommand } from '../format.ts';
 import { localizeApprovalDetail, localizeDetail } from '../../../shared/notices.ts';
@@ -91,6 +91,7 @@ const SESSION_LABEL = { command: 'approval.allow_session_command', file: 'approv
 const SESSION_HELP = { command: 'approval.help_allow_session_command', file: 'approval.help_allow_session_file', site: 'approval.help_allow_session_site' } as const;
 
 function decisionLabel(t: TFunc, d: ApprovalDecision, meta: ApprovalMeta | null): string {
+  if (d === 'allow' && meta?.form) return t(meta.form.url ? 'approval.urlDone' : meta.form.fields.length ? 'approval.submit' : 'approval.allow');
   if (d === 'allow_prefix') return t('approval.allow_prefix', { prefix: meta?.prefix ?? '' });
   if (d === 'allow_session' && meta?.scope) return t('approval.allow_session_scope', { scope: meta.scope });
   const target = chatTarget(meta);
@@ -113,10 +114,13 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
   const [busy, setBusy] = useState<ApprovalDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
   const options = meta?.options ?? [];
+  const form = meta?.form ?? null;
+  const [values, setValues] = useState<ApprovalAnswers>(() => (form ? initialAnswers(form) : {}));
+  const incomplete = form ? form.fields.some((f) => f.required && !answered(values[f.id])) : false;
   const decide = (d: ApprovalDecision) => {
     setBusy(d);
     setError(null);
-    api.decideApproval(message.id, d).then(
+    api.decideApproval(message.id, d, form && d !== 'deny' ? values : undefined).then(
       () => setBusy(null),
       (e: unknown) => {
         setBusy(null);
@@ -158,6 +162,16 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
                 {meta.workspace}
               </div>
             )}
+            {meta?.answers && (
+              <dl className="approval-answers">
+                {Object.entries(meta.answers).map(([k, v]) => (
+                  <div key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
             {outcome && <div className="approval-outcome">{outcome}</div>}
           </div>
         </details>
@@ -189,6 +203,18 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
         </div>
       )}
       {outcome && <div className="approval-outcome">{outcome}</div>}
+      {form?.url && options.includes('allow') && (
+        <a className="approval-url" href={form.url} target="_blank" rel="noopener noreferrer" title={form.url}>
+          <Icon name="external" size={13} /> {t('approval.openUrl')} <span>{form.url}</span>
+        </a>
+      )}
+      {form && form.fields.length > 0 && options.includes('allow') && (
+        <div className="approval-form">
+          {form.fields.map((f) => (
+            <FormField key={f.id} field={f} value={values[f.id]} disabled={busy !== null} onChange={(v) => setValues((cur) => ({ ...cur, [f.id]: v }))} />
+          ))}
+        </div>
+      )}
       {state === 'pending' && options.length > 0 && (
         <div className="approval-actions">
           {options.map((d) => (
@@ -196,7 +222,7 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
               key={d}
               type="button"
               className={d === 'deny' ? 'danger-outline' : d === 'allow' ? 'primary' : undefined}
-              disabled={busy !== null}
+              disabled={busy !== null || (d === 'allow' && incomplete)}
               onClick={() => decide(d)}
             >
               {busy === d ? t('approval.sending') : decisionLabel(t, d, meta)}
@@ -207,6 +233,123 @@ export function ApprovalCard({ message, sender, showAvatar }: { message: Message
       {state === 'pending' && options.length === 0 && <div className="hint">{t('approval.cannotAnswer')}</div>}
       {error && <div className="error-text">{t('approval.notSent', { error })}</div>}
     </div>
+  );
+}
+
+const answered = (v: ApprovalAnswerValue | undefined) =>
+  v !== undefined && v !== '' && !(typeof v === 'object' && !v.selected.length && !(v.other ?? '').trim());
+
+function initialAnswers(form: ApprovalForm): ApprovalAnswers {
+  const out: ApprovalAnswers = {};
+  for (const f of form.fields) {
+    if (f.kind === 'choice') out[f.id] = { selected: f.default ?? [] };
+    else if (f.kind === 'boolean') out[f.id] = f.default ?? false;
+    else if (f.default != null) out[f.id] = f.default;
+  }
+  return out;
+}
+
+const INPUT_TYPE = { email: 'email', uri: 'url', date: 'date', 'date-time': 'datetime-local' } as const;
+
+/** One field of a native form (questions from Codex / Claude Code, or an MCP server's form). */
+function FormField({ field: f, value, disabled, onChange }: { field: ApprovalField; value: ApprovalAnswerValue | undefined; disabled: boolean; onChange: (v: ApprovalAnswerValue) => void }) {
+  const t = useT();
+  const head = (
+    <>
+      {'header' in f && f.header && <span className="approval-field-header">{f.header}</span>}
+      <span className="approval-field-label">
+        {f.label}
+        {f.required && f.kind !== 'boolean' && <span className="approval-field-req"> *</span>}
+      </span>
+      {f.description && <span className="approval-field-desc">{f.description}</span>}
+    </>
+  );
+  if (f.kind === 'boolean') {
+    return (
+      <label className="approval-field approval-check">
+        <input type="checkbox" checked={value === true} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+        <span>{head}</span>
+      </label>
+    );
+  }
+  if (f.kind === 'choice') {
+    const cur = value && typeof value === 'object' ? value : { selected: [] as string[], other: null };
+    const otherOn = cur.other != null;
+    const pick = (v: string, on: boolean) => {
+      if (!f.multiple) return onChange({ selected: on ? [v] : [] });
+      const sel = on ? [...cur.selected.filter((x) => x !== v), v] : cur.selected.filter((x) => x !== v);
+      onChange(otherOn ? { selected: sel, other: cur.other } : { selected: sel });
+    };
+    const name = `f-${f.id}`;
+    return (
+      <fieldset className="approval-field">
+        <legend>{head}</legend>
+        {f.options.map((o) => (
+          <label key={o.value} className="approval-option">
+            <input
+              type={f.multiple ? 'checkbox' : 'radio'}
+              name={name}
+              checked={cur.selected.includes(o.value)}
+              disabled={disabled}
+              onChange={(e) => pick(o.value, e.target.checked)}
+            />
+            <span>
+              {o.label}
+              {o.description && <span className="approval-option-desc">{o.description}</span>}
+            </span>
+          </label>
+        ))}
+        {f.other && (
+          <label className="approval-option approval-other">
+            <input
+              type={f.multiple ? 'checkbox' : 'radio'}
+              name={name}
+              checked={otherOn}
+              disabled={disabled}
+              onChange={(e) => onChange(e.target.checked ? { selected: f.multiple ? cur.selected : [], other: cur.other ?? '' } : { selected: cur.selected })}
+            />
+            <span>{t('approval.other')}</span>
+            <input
+              type="text"
+              value={cur.other ?? ''}
+              disabled={disabled}
+              aria-label={t('approval.other')}
+              onFocus={() => !otherOn && onChange({ selected: f.multiple ? cur.selected : [], other: '' })}
+              onChange={(e) => onChange({ selected: f.multiple ? cur.selected : [], other: e.target.value })}
+            />
+          </label>
+        )}
+      </fieldset>
+    );
+  }
+  if (f.kind === 'number') {
+    return (
+      <label className="approval-field">
+        {head}
+        <input
+          type="number"
+          value={typeof value === 'number' ? value : typeof value === 'string' ? value : ''}
+          min={f.min ?? undefined}
+          max={f.max ?? undefined}
+          step={f.integer ? 1 : 'any'}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))}
+        />
+      </label>
+    );
+  }
+  return (
+    <label className="approval-field">
+      {head}
+      <input
+        type={f.secret ? 'password' : f.format ? INPUT_TYPE[f.format] : 'text'}
+        value={typeof value === 'string' ? value : ''}
+        maxLength={f.maxLength ?? undefined}
+        autoComplete="off"
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </label>
   );
 }
 
@@ -260,9 +403,13 @@ export function SessionChoiceCard({ message, sender }: { message: Message; sende
   );
 }
 
+/** What a folded group still shows: the latest item and anything still running. Failures are counted in the head. */
+export const foldedActivities = (messages: Message[]) =>
+  messages.filter((m, i) => i === messages.length - 1 || m.status === 'streaming');
+
 /**
  * A run of consecutive tool activities by one member, folded to a summary line so long tool logs do not bury the
- * conversation. The latest item stays visible; anything still running or failed is never hidden.
+ * conversation.
  */
 export function ActivityGroup({ messages, sender, showAvatar }: { messages: Message[]; sender?: AgentWithStatus; showAvatar?: boolean }) {
   const t = useT();
@@ -276,7 +423,7 @@ export function ActivityGroup({ messages, sender, showAvatar }: { messages: Mess
   }
   const summary = [...kinds].map(([k, n]) => `${activityLabel(t, k)} ${n}`).join(' · ');
   const last = messages[messages.length - 1]!;
-  const visible = open ? messages : messages.filter((m, i) => i === messages.length - 1 || m.status === 'streaming' || m.status === 'failed');
+  const visible = open ? messages : foldedActivities(messages);
   return (
     <div className="activity-group" data-seq={messages[0]!.seq} data-last-seq={last.seq}>
       {lead(showAvatar, sender)}

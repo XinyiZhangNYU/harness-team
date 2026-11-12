@@ -16,6 +16,8 @@ export const TEAM_MCP_SERVER = 'harness_team';
 
 interface Texts {
   trigger: string;
+  /** Heading of a message the user added to a turn that is running (steer). */
+  steer: string;
   hint: string;
   pointer: string;
   reply: string;
@@ -34,6 +36,8 @@ interface Texts {
   member: (handle: string, what: string) => string;
   agent: (handle: string, runtime: string) => string;
   sessionReset: (teamMcp: boolean) => string;
+  /** Other members working in the same folder right now; `seqs` null = in another chat. */
+  folderPeers: (peers: FolderPeer[]) => string;
   contextSection: string;
   omitted: (n: number, teamMcp: boolean) => string;
   replyTo: (seq: number) => string;
@@ -61,6 +65,7 @@ const MCP_TOOLS = (lang: AgentLanguage) =>
 const TEXTS: Record<AgentLanguage, Texts> = {
   zh: {
     trigger: '—— 需要你处理的消息 ——',
+    steer: '—— 你工作时用户补充了一条消息，请结合它继续当前任务 ——',
     hint: '协作方式：',
     pointer: '（来源规则与协作方式见会话开头的 Harness Team 说明。）',
     reply: '请用简体中文回复（除非用户另有要求）。',
@@ -88,6 +93,8 @@ const TEXTS: Record<AgentLanguage, Texts> = {
     agent: (handle, runtime) => `@${handle}（${runtime} · Agent）`,
     sessionReset: (teamMcp) =>
       `（你在本群之前的原生会话已无法续接，这是一个新会话，之前的对话和工作上下文都不在这里${teamMcp ? '；需要时可用 get_messages 查看本群更早的消息' : ''}。）`,
+    folderPeers: (peers) =>
+      `同一工作目录里还有成员正在工作：${peers.map((p) => `@${p.handle}（${p.seqs === null ? '在另一个群聊' : p.seqs.length ? `处理本群 ${p.seqs.map((n) => `#${n}`).join('、')}` : '本群'}）`).join('、')}。改文件时注意别和对方冲突。`,
     contextSection: '—— 你上次之后的其他群消息（仅供了解）——',
     omitted: (n, teamMcp) => `（另有 ${n} 条更早的消息未列出${teamMcp ? '，可用 get_messages 查看' : ''}）`,
     replyTo: (seq) => `回复 #${seq}`,
@@ -103,6 +110,7 @@ const TEXTS: Record<AgentLanguage, Texts> = {
   },
   en: {
     trigger: '—— Messages for you to handle ——',
+    steer: '—— The user added a message while you were working; take it into account as you go on ——',
     hint: 'How to work together: ',
     pointer: '(The source rule and how to work together are in the Harness Team notes at the start of this session.)',
     reply: 'Reply in English unless the user asks otherwise.',
@@ -134,6 +142,8 @@ const TEXTS: Record<AgentLanguage, Texts> = {
     sessionReset: (teamMcp) =>
       '(Your earlier native session in this chat can no longer be resumed. This is a new session: the earlier ' +
       `conversation and working context are not here${teamMcp ? '; use get_messages to see older messages of this chat when needed' : ''}.)`,
+    folderPeers: (peers) =>
+      `Also working in this folder right now: ${peers.map((p) => `@${p.handle} (${p.seqs === null ? 'in another chat' : p.seqs.length ? `on ${p.seqs.map((n) => `#${n}`).join(', ')} here` : 'here'})`).join(', ')}. Avoid conflicting edits.`,
     contextSection: '—— Other chat messages since your last turn (for context only) ——',
     omitted: (n, teamMcp) => `(${n} older ${n === 1 ? 'message is' : 'messages are'} not listed${teamMcp ? '; use get_messages to see them' : ''})`,
     replyTo: (seq) => `reply to #${seq}`,
@@ -194,7 +204,13 @@ export function instructionsVersion(text: string): string {
 const TRIGGER_MAX = 12_000;
 const CONTEXT_MAX = 1_500;
 
-const RUNTIME_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', dsh: 'DeepSeek Harness', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok', kimi: 'Kimi Code', chat: 'Chat API', mock: 'Mock' };
+const RUNTIME_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', dsh: 'DeepSeek Harness', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok', kimi: 'Kimi Code', chat: 'API', mock: 'Mock' };
+
+/** A member working in the same folder: the seqs of the messages its turn handles, or null when in another chat. */
+export interface FolderPeer {
+  handle: string;
+  seqs: number[] | null;
+}
 
 export interface EnvelopeInput {
   room: Room;
@@ -219,6 +235,8 @@ export interface EnvelopeInput {
   standing?: boolean;
   /** First turn of a new native session the user started after the previous one was lost (archived / deleted). */
   sessionReset?: boolean;
+  /** Other members working in this member's folder right now (a chat that lets them share it at once). */
+  folderPeers?: FolderPeer[];
   /** Resolves sender ids to agents (members or former members). */
   agentById: (id: string) => Agent | undefined;
   /** Resolves a reply_to message id to its seq. */
@@ -302,6 +320,7 @@ export function buildEnvelope(input: EnvelopeInput): string {
   out.push(t.members(memberList));
   if (!input.standing) out.push(t.sourceRule);
   if (input.sessionReset) out.push(t.sessionReset(input.teamMcp));
+  if (input.folderPeers?.length) out.push(t.folderPeers(input.folderPeers));
   if (input.context.length || input.omitted) {
     out.push('');
     out.push(t.contextSection);
@@ -315,4 +334,13 @@ export function buildEnvelope(input: EnvelopeInput): string {
   out.push(input.standing ? t.pointer : hintText(input.teamMcp, lang, input.restricted));
   out.push(t.reply);
   return out.join('\n');
+}
+
+/**
+ * The text of a user message added to the turn that is running (steer): the message as it would appear among the
+ * messages to handle, under its own heading. The rest of the envelope is already in the turn.
+ */
+export function buildSteerText(input: Pick<EnvelopeInput, 'room' | 'language' | 'agentById' | 'seqOf' | 'attachmentPath'>, m: Message): string {
+  const full = { ...input, self: {} as Agent, members: [], triggers: [m], context: [], omitted: 0, teamMcp: false } as EnvelopeInput;
+  return [T(langOf(full)).steer, line(m, full, TRIGGER_MAX, true)].join('\n');
 }

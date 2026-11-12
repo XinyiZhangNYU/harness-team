@@ -57,6 +57,11 @@ export interface Room {
   /** Takes effect from each member's next turn. */
   agentLanguage: AgentLanguage;
   /**
+   * Members of this chat that share a working folder start their turns without waiting for each other; each turn is
+   * told who else is working in that folder. Default false: one member at a time per folder.
+   */
+  parallelInFolder: boolean;
+  /**
    * Agent members (ids, joining order) that a user message without any @mention goes to. Empty: such a message goes
    * to the member that last posted a chat message in the room; with no such member it wakes nobody.
    */
@@ -73,6 +78,7 @@ export interface RoomPatch {
   pinned?: boolean;
   archived?: boolean;
   agentLanguage?: AgentLanguage;
+  parallelInFolder?: boolean;
 }
 
 export type TaskStatus = 'todo' | 'doing' | 'done';
@@ -235,6 +241,11 @@ export interface Agent {
   billingSeen: RuntimeBilling | null;
   /** Language this member is spoken to and replies in; null = the room's (Room.agentLanguage). */
   language: AgentLanguage | null;
+  /**
+   * Claude Code members only (null for other runtimes): started with `--chrome`, so Claude in Chrome's browser tools
+   * are available when the extension is installed and connected. Each tool call still asks through approvals.
+   */
+  chrome: boolean | null;
 }
 
 /** A member avatar: a base64 WebP / PNG / JPEG data URL, as the page makes it (128 px square). */
@@ -604,7 +615,65 @@ export type MessageMeta =
       prefix?: string | null;
       /** Claude Code: the rules and folders that `allow_session` adds for the rest of the session. */
       scope?: string | null;
+      /** The runtime asks for answers (questions, an MCP form, a link to open): `allow` sends them. */
+      form?: ApprovalForm;
+      /** What the user answered, as shown on the card (secret fields left out). */
+      answers?: Record<string, string>;
     };
+
+/** One field of a native form, as the runtime described it. */
+export type ApprovalField =
+  | {
+      kind: 'choice';
+      id: string;
+      label: string;
+      header?: string | null;
+      description?: string | null;
+      options: { value: string; label: string; description?: string | null }[];
+      multiple: boolean;
+      /** A typed answer may be given instead of the options. */
+      other: boolean;
+      required: boolean;
+      default?: string[] | null;
+      minItems?: number | null;
+      maxItems?: number | null;
+    }
+  | {
+      kind: 'text';
+      id: string;
+      label: string;
+      header?: string | null;
+      description?: string | null;
+      secret: boolean;
+      format?: 'email' | 'uri' | 'date' | 'date-time' | null;
+      required: boolean;
+      default?: string | null;
+      minLength?: number | null;
+      maxLength?: number | null;
+    }
+  | {
+      kind: 'number';
+      id: string;
+      label: string;
+      description?: string | null;
+      integer: boolean;
+      required: boolean;
+      default?: number | null;
+      min?: number | null;
+      max?: number | null;
+    }
+  | { kind: 'boolean'; id: string; label: string; description?: string | null; required: boolean; default?: boolean | null };
+
+/** A native request that asks for answers. No fields + no url = a plain allow / deny question. */
+export interface ApprovalForm {
+  fields: ApprovalField[];
+  /** URL mode: the user finishes something on this page, then confirms. */
+  url?: string | null;
+}
+
+/** The user's answers, by field id: text → string, number → number, boolean → boolean, choice → chosen option values and/or a typed answer. */
+export type ApprovalAnswerValue = string | number | boolean | { selected: string[]; other?: string | null };
+export type ApprovalAnswers = Record<string, ApprovalAnswerValue>;
 
 /**
  * A human decision on a native approval request, chosen by the local user in the group chat.
@@ -782,6 +851,8 @@ export interface CreateAgentRequest {
   acknowledgeCollabRisk?: string;
   /** Omitted/null = follow the room's language. */
   language?: AgentLanguage | null;
+  /** Claude Code members only (refused otherwise); omitted = off. The app ticks it for a new Claude Code member. */
+  chrome?: boolean;
   /** Chat members: the provider whose `model` they call (required for runtimeKind 'chat', refused otherwise). */
   providerId?: string;
   /** Chat members only; omitted fields take the defaults (DEFAULT_CHAT_MEMBER). */
@@ -804,6 +875,8 @@ export interface UpdateAgentRequest {
   acknowledgeCollabRisk?: string;
   /** null = follow the room's language. */
   language?: AgentLanguage | null;
+  /** Claude Code members only: Claude in Chrome on or off (the idle process restarts on the same session). */
+  chrome?: boolean;
   /** Chat members only: `model` is another model of the same provider; these change the member's own settings. */
   chat?: Partial<ChatMemberSettings>;
 }
@@ -845,6 +918,24 @@ export interface PostMessageRequest {
   body: string;
   /** Client-generated id used for idempotent retries. */
   clientMessageId: string;
+  /** Add the message to the turn each addressed member is running now (Ctrl+Enter), where its runtime can. */
+  steer?: boolean;
+}
+
+/**
+ * A member that was working when a message was sent with `steer`, but gets it with its next turn instead:
+ * `unsupported` = its runtime cannot add a message to a running turn; `elsewhere` = its turn runs in another chat.
+ */
+export interface SteerSkip {
+  agentId: string;
+  handle: string;
+  reason: 'unsupported' | 'elsewhere';
+}
+
+export interface PostMessageResponse {
+  message: Message;
+  /** Only for a message sent with `steer`. */
+  queued?: SteerSkip[];
 }
 
 export interface RoomSnapshot {

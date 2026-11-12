@@ -10,6 +10,8 @@ export interface MenuItem {
   separator?: boolean;
   /** A choice in a set (drawn with a check mark when true; announced as a radio item). */
   checked?: boolean;
+  /** With `checked`: an on/off setting of its own (announced as a checkbox item). */
+  toggle?: boolean;
   /** Tooltip, e.g. why a disabled item is not available. */
   title?: string;
 }
@@ -91,7 +93,7 @@ export function ContextMenu(props: { x: number; y: number; items: MenuItem[]; la
           {it.separator && <div className="context-menu-sep" role="separator" />}
           <button
             type="button"
-            role={it.checked === undefined ? 'menuitem' : 'menuitemradio'}
+            role={it.checked === undefined ? 'menuitem' : it.toggle ? 'menuitemcheckbox' : 'menuitemradio'}
             aria-checked={it.checked === undefined ? undefined : it.checked}
             className={[it.danger ? 'danger' : '', it.checked === undefined ? '' : 'choice', it.checked ? 'checked' : ''].filter(Boolean).join(' ') || undefined}
             disabled={it.disabled}

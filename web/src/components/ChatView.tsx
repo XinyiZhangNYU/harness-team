@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import type { AgentWithStatus, DeliveryInfo, Message, Room, RuntimeDescriptor } from '../../../shared/protocol.ts';
+import type { AgentWithStatus, DeliveryInfo, Message, Room, RuntimeDescriptor, SteerSkip } from '../../../shared/protocol.ts';
 import { api } from '../api.ts';
 import { useAttachmentDrafts } from '../attachments.ts';
 import { usePrefs, useT } from '../i18n.tsx';
@@ -102,7 +102,7 @@ export function ChatView(props: {
   runtimes: RuntimeDescriptor[];
   /** Opens a member's settings (from the slash-command list). */
   onOpenMember?: (agentId: string) => void;
-  onSend: (body: string, clientMessageId: string, attachmentIds: string[]) => Promise<void>;
+  onSend: (body: string, clientMessageId: string, attachmentIds: string[], steer: boolean) => Promise<SteerSkip[]>;
   onError: (err: unknown) => void;
   /** The live connection to the server is down (it reconnects on its own). */
   offline?: boolean;

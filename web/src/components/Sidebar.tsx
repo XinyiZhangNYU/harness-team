@@ -75,6 +75,7 @@ export function Sidebar(props: {
       label: r.agentLanguage === 'en' ? t('room.agentLangToZh') : t('room.agentLangToEn'),
       onSelect: () => update(r, { agentLanguage: r.agentLanguage === 'en' ? 'zh' : 'en' }),
     },
+    { label: t('room.parallelInFolder'), checked: r.parallelInFolder, toggle: true, onSelect: () => update(r, { parallelInFolder: !r.parallelInFolder }) },
     { label: t('room.delete'), danger: true, separator: true, onSelect: () => setDeleting(r) },
   ];
 

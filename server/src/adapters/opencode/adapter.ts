@@ -61,6 +61,8 @@ export class OpenCodeAdapter extends AcpAdapter<OpenCodeAdapterOptions> {
     'OpenCode has no usable credentials for the chosen model: run opencode auth login in your own terminal (Vertex needs gcloud ADC and GOOGLE_CLOUD_PROJECT), then try again',
   );
   override readonly ruleFiles = ['AGENTS.md', 'CLAUDE.md'];
+  /** Its question tool asks through elicitation/create (a form in the chat) when the client offers it. */
+  protected override readonly formElicitation = true;
 
   get permissionModes(): readonly PermissionMode[] {
     return PERMISSION_MODES.opencode;

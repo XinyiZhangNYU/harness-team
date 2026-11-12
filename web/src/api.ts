@@ -5,6 +5,7 @@ import type {
   AgentCommands,
   AgentDetailResponse,
   AgentWithStatus,
+  ApprovalAnswers,
   ApprovalDecision,
   AvatarDefaultKey,
   AvatarDefaults,
@@ -27,6 +28,7 @@ import type {
   SaveChatModelRequest,
   SaveChatProviderRequest,
   ServerEvent,
+  SteerSkip,
   Task,
   TaskStatus,
   UpdateAgentRequest,
@@ -119,12 +121,14 @@ export const api = {
   removeMember: (roomId: string, agentId: string) =>
     request<{ ok: boolean }>('DELETE', `/api/rooms/${roomId}/members/${agentId}`, {}),
   deleteAgent: (id: string) => request<{ ok: boolean }>('DELETE', `/api/agents/${id}`, {}),
-  postMessage: (roomId: string, body: string, clientMessageId: string, attachmentIds: string[] = []) =>
-    request<{ message: Message }>('POST', `/api/rooms/${roomId}/messages`, {
+  /** `steer` (Ctrl+Enter): into the running turn of each addressed member that can take it; `queued` lists the others. */
+  postMessage: (roomId: string, body: string, clientMessageId: string, attachmentIds: string[] = [], steer = false) =>
+    request<{ message: Message; queued?: SteerSkip[] }>('POST', `/api/rooms/${roomId}/messages`, {
       body,
       clientMessageId,
       ...(attachmentIds.length ? { attachmentIds } : {}),
-    }).then((r) => r.message),
+      ...(steer ? { steer } : {}),
+    }),
   /** Raw file bytes; the server decides the type from the bytes themselves. */
   uploadAttachment: async (roomId: string, file: Blob & { name?: string }): Promise<AttachmentInfo> => {
     const res = await fetch(`/api/rooms/${roomId}/attachments`, {
@@ -147,8 +151,8 @@ export const api = {
     request<{ task: Task }>('POST', `/api/rooms/${roomId}/tasks/${taskId}`, patch).then((r) => r.task),
   interrupt: (agentId: string) => request<{ requested: boolean }>('POST', `/api/agents/${agentId}/interrupt`, {}),
   interruptRoom: (roomId: string) => request<{ requested: number }>('POST', `/api/rooms/${roomId}/interrupt`, {}),
-  decideApproval: (messageId: string, decision: ApprovalDecision) =>
-    request<{ message: Message }>('POST', `/api/approvals/${messageId}`, { decision }).then((r) => r.message),
+  decideApproval: (messageId: string, decision: ApprovalDecision, answers?: ApprovalAnswers) =>
+    request<{ message: Message }>('POST', `/api/approvals/${messageId}`, { decision, ...(answers ? { answers } : {}) }).then((r) => r.message),
   chooseSession: (messageId: string, choice: SessionChoiceOption) =>
     request<{ message: Message }>('POST', `/api/session-choices/${messageId}`, { choice }).then((r) => r.message),
 };
