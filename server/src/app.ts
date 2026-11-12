@@ -40,7 +40,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.12.1';
+export const SERVER_VERSION = '0.12.2';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
