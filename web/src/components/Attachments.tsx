@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { AttachmentInfo } from '../../../shared/protocol.ts';
 import { attachmentUrl, formatBytes, type DraftAttachment } from '../attachments.ts';
+import { citationLabel, citationPath, type FileCitation } from '../file-citations.ts';
 import { useT } from '../i18n.tsx';
 import { Dialog } from './Dialog.tsx';
 import { HelpTip } from './HelpTip.tsx';
@@ -95,6 +96,42 @@ function FileCard({ roomId, file }: { roomId: string; file: AttachmentInfo }) {
         </span>
       )}
     </li>
+  );
+}
+
+/**
+ * A file a member cited in its reply. In the desktop app a click opens it with its default program (programs, scripts
+ * and pages are shown in their folder instead); in a browser it is plain text with the full path on hover.
+ */
+export function FileCitationChip({ citation, workspace }: { citation: FileCitation; workspace: string | null | undefined }) {
+  const t = useT();
+  const [note, setNote] = useState<string | null>(null);
+  const label = citationLabel(citation);
+  const target = citationPath(citation.path, workspace);
+  const open = window.harnessDesktop?.localFile;
+  const title = note ? `${note}: ${citation.path}` : citation.path;
+  if (!open || !target) {
+    return (
+      <span className="file-cite" title={title}>
+        <Icon name="file" size={13} />
+        {label}
+      </span>
+    );
+  }
+  const act = async () => {
+    setNote(null);
+    try {
+      const r = await open('open', target);
+      if (!r.ok) setNote(r.error === 'missing' ? t('attach.missing') : t('attach.failedOpen'));
+    } catch {
+      setNote(t('attach.failedOpen'));
+    }
+  };
+  return (
+    <button type="button" className={`file-cite${note ? ' file-cite-failed' : ''}`} title={title} onClick={() => void act()}>
+      <Icon name="file" size={13} />
+      {label}
+    </button>
   );
 }
 

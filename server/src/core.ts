@@ -543,10 +543,10 @@ export class Core {
   }
 
   // ---- commands ----
-  createRoom(name: string, projectDir?: string | null, agentLanguage: AgentLanguage = 'zh'): Room {
+  createRoom(name: string, projectDir?: string | null, agentLanguage: AgentLanguage = 'zh', parallelInFolder = false): Room {
     const trimmed = name.trim();
     if (!trimmed || trimmed.length > 80) throw new CoreError(400, 'room name must be 1-80 characters');
-    const room = this.store.createRoom(trimmed, projectDir ? this.checkProjectDir(projectDir) : null, agentLanguage);
+    const room = this.store.createRoom(trimmed, projectDir ? this.checkProjectDir(projectDir) : null, agentLanguage, parallelInFolder);
     this.bus.publish({ type: 'room.created', room });
     return room;
   }
@@ -873,7 +873,7 @@ export class Core {
 
   /** Sets (or with null removes) a runtime's default avatar; every window shows it at once. Members' own pictures win. */
   setAvatarDefault(kind: string, avatar: string | null): AvatarDefaults {
-    if (!isAvatarDefaultKey(kind)) throw new CoreError(400, L('只有 Claude Code、Codex、Antigravity、dsh、OpenCode、Cursor、Grok、Kimi 和模型供应商可以设置默认头像', 'Only Claude Code, Codex, Antigravity, dsh, OpenCode, Cursor, Grok, Kimi and model providers can have a default avatar'));
+    if (!isAvatarDefaultKey(kind)) throw new CoreError(400, L('只有 Claude Code、Codex、Antigravity、dsh、OpenCode、Cursor、Grok、Kimi、GitHub Copilot 和模型供应商可以设置默认头像', 'Only Claude Code, Codex, Antigravity, dsh, OpenCode, Cursor, Grok, Kimi, GitHub Copilot and model providers can have a default avatar'));
     if (avatar !== null && !isAgentAvatar(avatar)) throw new CoreError(400, L('头像格式不正确', 'Invalid avatar image'));
     this.store.setAvatarDefault(kind, avatar);
     const defaults = this.store.avatarDefaults();

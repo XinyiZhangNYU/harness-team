@@ -292,11 +292,13 @@ export class Store {
   }
 
   // ---- rooms ----
-  createRoom(name: string, projectDir: string | null = null, agentLanguage: AgentLanguage = 'zh'): Room {
+  createRoom(name: string, projectDir: string | null = null, agentLanguage: AgentLanguage = 'zh', parallelInFolder = false): Room {
     const id = randomUUID();
     this.db
       .prepare('INSERT INTO rooms (id, name, created_at, project_dir, auto_hop_limit, agent_language) VALUES (?, ?, ?, ?, ?, ?)')
       .run(id, name, now(), projectDir, NO_HOP_LIMIT, agentLanguage);
+    // Only when asked: older databases (migration tests) create rooms before the column exists.
+    if (parallelInFolder) this.db.prepare('UPDATE rooms SET parallel_in_folder = 1 WHERE id = ?').run(id);
     return this.getRoom(id)!;
   }
 

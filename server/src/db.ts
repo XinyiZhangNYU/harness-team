@@ -734,6 +734,42 @@ export const MIGRATIONS: Migration[] = [
     // 1: members of this chat that share a working folder do not wait for each other.
     sql: `ALTER TABLE rooms ADD COLUMN parallel_in_folder INTEGER NOT NULL DEFAULT 0 CHECK (parallel_in_folder IN (0,1));`,
   },
+  {
+    version: 31,
+    name: 'copilot runtime',
+    // GitHub Copilot CLI (official ACP server, `copilot --acp --stdio`) as a runtime kind: the runtime_kind CHECKs are
+    // rebuilt with the same columns and rows.
+    rebuildsReferencedTable: true,
+    sql: `
+      CREATE TABLE agents_v31 (
+        id                     TEXT PRIMARY KEY,
+        handle                 TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name           TEXT NOT NULL,
+        runtime_kind           TEXT NOT NULL CHECK (runtime_kind IN ('mock','codex','claude','antigravity','dsh','opencode','cursor','grok','kimi','copilot','chat')),
+        is_mock                INTEGER NOT NULL CHECK (is_mock IN (0,1)),
+        config_json            TEXT NOT NULL DEFAULT '{}',
+        created_at             TEXT NOT NULL,
+        deleted_at             TEXT,
+        provider_id            TEXT,
+        collab_mode            TEXT CHECK (collab_mode IN ('restricted','full')),
+        collab_confirmed_at    TEXT,
+        collab_warning_version TEXT,
+        CHECK ((runtime_kind = 'antigravity') = (collab_mode IS NOT NULL))
+      );
+      INSERT INTO agents_v31 (id, handle, display_name, runtime_kind, is_mock, config_json, created_at, deleted_at, provider_id, collab_mode, collab_confirmed_at, collab_warning_version)
+        SELECT id, handle, display_name, runtime_kind, is_mock, config_json, created_at, deleted_at, provider_id, collab_mode, collab_confirmed_at, collab_warning_version FROM agents;
+      DROP TABLE agents;
+      ALTER TABLE agents_v31 RENAME TO agents;
+      CREATE TABLE avatar_defaults_v31 (
+        runtime_kind TEXT PRIMARY KEY CHECK (runtime_kind IN ('codex','claude','antigravity','dsh','opencode','cursor','grok','kimi','copilot') OR runtime_kind LIKE 'chat:%'),
+        avatar       TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+      INSERT INTO avatar_defaults_v31 (runtime_kind, avatar, updated_at) SELECT runtime_kind, avatar, updated_at FROM avatar_defaults;
+      DROP TABLE avatar_defaults;
+      ALTER TABLE avatar_defaults_v31 RENAME TO avatar_defaults;
+    `,
+  },
 ];
 
 /**

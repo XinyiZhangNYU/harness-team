@@ -36,7 +36,7 @@ export function isCodingTool(name: string): name is CodingToolName {
 }
 
 /** Folders and files whose contents other tools run on their own (hooks, MCP servers, tasks, git hooks). */
-const AGENT_CONFIG_DIRS = new Set(['.claude', '.codex', '.gemini', '.cursor', '.vscode', '.idea', '.zed', '.opencode', '.kimi', '.grok', '.trae', '.agents', '.husky']);
+const AGENT_CONFIG_DIRS = new Set(['.claude', '.codex', '.gemini', '.cursor', '.vscode', '.idea', '.zed', '.opencode', '.kimi', '.grok', '.copilot', '.trae', '.agents', '.husky']);
 const AGENT_CONFIG_FILES = new Set(['.mcp.json', 'opencode.json', 'opencode.jsonc']);
 
 /**

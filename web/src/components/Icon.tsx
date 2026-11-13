@@ -9,6 +9,7 @@ const PATHS = {
   pin: 'M12 17v5M9 3h6l-1 7 3 3v2H7v-2l3-3z',
   send: 'M5 12h14M13 6l6 6-6 6',
   chevronRight: 'M9 6l6 6-6 6',
+  chevronLeft: 'M15 6l-6 6 6 6',
   chevronDown: 'M6 9l6 6 6-6',
   hash: 'M5 9h14M5 15h14M10 4L8 20M16 4l-2 16',
   users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8',

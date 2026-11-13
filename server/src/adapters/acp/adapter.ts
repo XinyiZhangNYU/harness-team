@@ -81,7 +81,7 @@ interface SelectOption {
   description?: string | null;
 }
 
-interface ConfigOption {
+export interface ConfigOption {
   id: string;
   name?: string;
   category?: string | null;
@@ -90,12 +90,12 @@ interface ConfigOption {
   options?: unknown;
 }
 
-interface UnstableModels {
+export interface UnstableModels {
   currentModelId?: string;
   availableModels?: { modelId: string; name?: string; description?: string | null }[];
 }
 
-interface ModeState {
+export interface ModeState {
   currentModeId?: string;
   availableModes?: { id: string; name?: string; description?: string | null }[];
 }
@@ -110,6 +110,12 @@ function selectOptions(o: ConfigOption | undefined): SelectOption[] {
     } else if (x && typeof x.value === 'string') out.push({ value: x.value, name: String(x.name ?? x.value), description: x.description ?? null });
   }
   return out;
+}
+
+/** The first of each key (Copilot lists `auto` twice). */
+function uniqueBy<T>(list: readonly T[], key: (x: T) => string): T[] {
+  const seen = new Set<string>();
+  return list.filter((x) => !seen.has(key(x)) && (seen.add(key(x)), true));
 }
 
 const byCategory = (opts: ConfigOption[], category: string) => opts.find((o) => o.category === category && (o.type ?? 'select') === 'select');
@@ -128,7 +134,7 @@ export function errText(e: unknown): string {
 export const isAuthError = (e: unknown) => e instanceof RpcError && (e.code === AUTH_REQUIRED || /auth(entication)? required/i.test(e.message));
 
 /** Names (not values) of risky modes: they let the runtime act without asking. */
-const RISKY_MODE = /yolo|bypass|skip|dangerous|auto[-_ ]?approve|full[-_ ]?auto/i;
+const RISKY_MODE = /yolo|bypass|skip|dangerous|auto[-_ ]?approve|full[-_ ]?auto|autopilot/i;
 
 const DETAIL_MAX = 6000;
 
@@ -212,6 +218,25 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
   }
   /** RuntimeDescriptor.note for an available runtime. */
   protected abstract availableNote(version: string | null): Localized;
+  /**
+   * The member's permission mode id for a session mode id the runtime reports (Copilot reports URLs such as
+   * `…/session-modes#agent`). Applied to every report as it arrives, so the rest of the session works with member ids.
+   */
+  memberModeId(native: string): string {
+    return native;
+  }
+  /** The session mode id sent to the runtime for a member's mode id (the inverse of memberModeId). */
+  nativeModeId(mode: string): string {
+    return mode;
+  }
+  /** Extra lines for the session info, from the options the runtime reported when the session opened. */
+  sessionNotes(_report: { configOptions: readonly ConfigOption[]; models: UnstableModels | null }): NoticeText[] {
+    return [];
+  }
+  /** A risk in the reported options outside the session mode (Copilot's allow_all); null = none. */
+  optionRisk(_configOptions: readonly ConfigOption[]): NoticeText | null {
+    return null;
+  }
   /** Arguments that start the ACP server when the options give none. */
   protected abstract defaultArgs(): string[];
 
@@ -745,6 +770,7 @@ export class AcpSession implements AgentSession {
     if (rules.length) {
       info.push(this.t('工作目录中有 {files}；{name} ACP 是否加载它们未确认', 'The working folder has {files}; whether {name} ACP loads them is not confirmed', { files: rules.join(', ') }));
     }
+    info.push(...this.adapter.sessionNotes({ configOptions: this.configOptions, models: this.models }));
     this.info = info;
   }
 
@@ -821,7 +847,7 @@ export class AcpSession implements AgentSession {
           : null,
       risky: RISKY_MODE.test(`${native} ${id ?? ''}`)
         ? this.t('{name} 报告的模式（{mode}）可能不经确认就执行工具', 'The mode {name} reports ({mode}) may run tools without asking', { mode: native })
-        : null,
+        : this.adapter.optionRisk(this.configOptions),
     };
   }
 
@@ -836,7 +862,7 @@ export class AcpSession implements AgentSession {
     if (modelOpt) {
       def = current(modelOpt);
       source = this.t('{name} ACP 会话选项（configOptions）', '{name} ACP session options (configOptions)');
-      models = selectOptions(modelOpt).map((o) => ({
+      models = uniqueBy(selectOptions(modelOpt), (o) => o.value).map((o) => ({
         id: o.value,
         displayName: o.name,
         description: o.description ?? null,
@@ -848,7 +874,7 @@ export class AcpSession implements AgentSession {
     } else if (this.models?.availableModels?.length) {
       def = this.models.currentModelId ?? null;
       source = this.t('{name} ACP 会话模型列表（不稳定接口）', '{name} ACP session model list (unstable interface)');
-      models = this.models.availableModels.map((m) => ({
+      models = uniqueBy(this.models.availableModels, (m) => m.modelId).map((m) => ({
         id: m.modelId,
         displayName: m.name ?? m.modelId,
         description: m.description ?? null,
@@ -1054,7 +1080,8 @@ export class AcpSession implements AgentSession {
         const m = begin(st.kind);
         let res: any;
         try {
-          res = await rpc.request<any>('session/set_config_option', { sessionId: this.nativeSessionId, configId: opt.id, value: st.value }, 30_000);
+          const value = st.kind === 'mode' ? this.adapter.nativeModeId(st.value) : st.value;
+          res = await rpc.request<any>('session/set_config_option', { sessionId: this.nativeSessionId, configId: opt.id, value }, 30_000);
         } catch (e) {
           // No confirmed answer: it may still have been applied, and may have changed other options with it.
           this.unsure = { model: true, effort: true, mode: true };
@@ -1096,7 +1123,7 @@ export class AcpSession implements AgentSession {
         if (!this.modes.availableModes.some((m) => m.id === st.value)) return notOffered(st);
         const m = begin('mode');
         try {
-          await rpc.request('session/set_mode', { sessionId: this.nativeSessionId, modeId: st.value }, 30_000);
+          await rpc.request('session/set_mode', { sessionId: this.nativeSessionId, modeId: this.adapter.nativeModeId(st.value) }, 30_000);
           // session/set_mode answers with nothing (a current_mode_update may follow): its success is the confirmation.
           this.modes = { ...this.modes, currentModeId: st.value };
           this.unsure.mode = false;
@@ -1178,6 +1205,28 @@ export class AcpSession implements AgentSession {
     for (const k of CONFIG_KINDS) if (k in this.maybe) this.maybeAt[k] = { gen: this.reportGen[k], linked: false };
   }
 
+  /** The ACP session modes with the member's mode ids. */
+  private memberModes(m: ModeState): ModeState {
+    const id = (v: unknown) => (typeof v === 'string' ? this.adapter.memberModeId(v) : v);
+    return {
+      ...m,
+      ...(m.currentModeId !== undefined ? { currentModeId: id(m.currentModeId) as string } : {}),
+      ...(Array.isArray(m.availableModes) ? { availableModes: m.availableModes.map((x) => ({ ...x, id: id(x?.id) as string })) } : {}),
+    };
+  }
+
+  /** A `mode` config option with the member's mode ids as its values (other options as reported). */
+  private memberModeOption(o: ConfigOption): ConfigOption {
+    if (o?.category !== 'mode') return o;
+    const id = (v: unknown) => (typeof v === 'string' ? this.adapter.memberModeId(v) : v);
+    const mapOne = (x: any) => (x && typeof x.value === 'string' ? { ...x, value: id(x.value) } : x);
+    return {
+      ...o,
+      currentValue: id(o.currentValue),
+      ...(Array.isArray(o.options) ? { options: (o.options as any[]).map((x) => (x && Array.isArray(x.options) ? { ...x, options: x.options.map(mapOne) } : mapOne(x))) } : {}),
+    };
+  }
+
   /**
    * Takes the option state the runtime reported (an open answer, a set_config_option answer, config_option_update)
    * and marks as known only the options it covers: `models` / `modes` (the older interface) the model / mode; a full
@@ -1185,8 +1234,8 @@ export class AcpSession implements AgentSession {
    */
   private takeReport(r: { configOptions?: unknown; models?: unknown; modes?: unknown }) {
     if (r.models && typeof r.models === 'object') this.models = r.models as UnstableModels;
-    if (r.modes && typeof r.modes === 'object') this.modes = r.modes as ModeState;
-    const list = Array.isArray(r.configOptions) ? (r.configOptions as ConfigOption[]) : null;
+    if (r.modes && typeof r.modes === 'object') this.modes = this.memberModes(r.modes as ModeState);
+    const list = Array.isArray(r.configOptions) ? (r.configOptions as ConfigOption[]).map((o) => this.memberModeOption(o)) : null;
     if (list) this.configOptions = list;
     const inList = (c: string) => !!list && !!byCategory(list, c);
     const known = (k: ConfigKind) => {
@@ -1403,7 +1452,7 @@ export class AcpSession implements AgentSession {
         return;
       case 'current_mode_update':
         if (typeof u.currentModeId === 'string') {
-          this.modes = { ...(this.modes ?? {}), currentModeId: u.currentModeId };
+          this.modes = { ...(this.modes ?? {}), currentModeId: this.adapter.memberModeId(u.currentModeId) };
           if (!byCategory(this.configOptions, 'mode')) {
             this.unsure.mode = false;
             this.reportGen.mode++;
@@ -1966,14 +2015,23 @@ class AcpTurn {
   }
 }
 
-/** ACP `usage` on the prompt response (unstable field), when the runtime reports it. The cost comes from usage_update. */
-function acpUsage(u: any): TurnUsage[] | undefined {
+/**
+ * ACP `usage` on the prompt response (unstable field), when the runtime reports it. The cost comes from usage_update.
+ * Runtimes disagree on whether `inputTokens` includes the cached tokens (Copilot and Grok: yes, totalTokens = input +
+ * output; OpenCode: no, totalTokens adds the cache). HT counts input without the cache, so `totalTokens` decides.
+ */
+export function acpUsage(u: any): TurnUsage[] | undefined {
   if (!u || typeof u !== 'object') return undefined;
   const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
-  const input = n(u.inputTokens);
+  let input = n(u.inputTokens);
   const output = n(u.outputTokens);
   const cacheRead = n(u.cachedReadTokens);
-  const cacheWrite = n(u.cachedWriteTokens);
+  const cacheWrite = n(u.cachedWriteTokens) || n(u.cacheCreationTokens);
+  const total = n(u.totalTokens);
+  const cache = cacheRead + cacheWrite;
+  if (total && cache && cache <= input && Math.abs(total - (input + output)) < Math.abs(total - (input + output + cache))) {
+    input -= cache;
+  }
   if (!input && !output && !cacheRead && !cacheWrite) return undefined;
-  return [{ model: null, input, cacheRead, cacheWrite, output, reasoning: n(u.thoughtTokens), costUsd: null }];
+  return [{ model: null, input, cacheRead, cacheWrite, output, reasoning: n(u.thoughtTokens) || n(u.reasoningTokens), costUsd: null }];
 }

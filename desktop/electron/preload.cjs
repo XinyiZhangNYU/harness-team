@@ -19,6 +19,12 @@ contextBridge.exposeInMainWorld('harnessDesktop', {
       id: String(ref && ref.id),
       name: String(ref && ref.name),
     }),
+  /**
+   * A file a member cited in its reply, by absolute path (the main process checks it).
+   * @param {'open' | 'reveal'} action
+   * @param {string} filePath
+   */
+  localFile: (action, filePath) => ipcRenderer.invoke('ht:local-file', action === 'open' ? 'open' : 'reveal', String(filePath)),
   /** Height of the title bar the page draws (Windows; same value as main.cjs), 0 where the system draws it. */
   titleBarHeight: process.platform === 'win32' ? 36 : 0,
   /** @param {(id: string, arg: string | null) => void} listener @returns {() => void} */

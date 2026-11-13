@@ -67,8 +67,8 @@ export const api = {
   /** Looks for the harness CLIs again (no model request); the result also arrives as `runtimes.updated`. */
   detectRuntimes: () => request<{ runtimes: RuntimeDescriptor[] }>('POST', '/api/runtimes/detect', {}).then((r) => r.runtimes),
   rooms: () => request<{ rooms: Room[] }>('GET', '/api/rooms').then((r) => r.rooms),
-  createRoom: (name: string, projectDir: string | null = null, agentLanguage: AgentLanguage = 'zh') =>
-    request<{ room: Room }>('POST', '/api/rooms', { name, projectDir, agentLanguage }).then((r) => r.room),
+  createRoom: (name: string, projectDir: string | null = null, agentLanguage: AgentLanguage = 'zh', parallelInFolder = false) =>
+    request<{ room: Room }>('POST', '/api/rooms', { name, projectDir, agentLanguage, parallelInFolder }).then((r) => r.room),
   room: (id: string) => request<RoomSnapshot>('GET', `/api/rooms/${id}?limit=500`),
   deleteRoom: (id: string) => request<{ ok: boolean }>('DELETE', `/api/rooms/${id}`, {}),
   agents: () => request<{ agents: AgentWithStatus[] }>('GET', '/api/agents').then((r) => r.agents),

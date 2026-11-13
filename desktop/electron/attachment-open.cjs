@@ -61,4 +61,30 @@ function attachmentPath(dataDir, ref) {
   return p;
 }
 
-module.exports = { attachmentPath, canOpenDirectly };
+/**
+ * A file a member cited in its reply (an absolute local path), or null. Only plain local paths: on Windows a drive
+ * letter path with no further ':' (no network shares, device paths or alternate streams; touching a share would
+ * already send the user's credentials to that host), elsewhere a single leading '/'. Checked before the file system is
+ * asked anything; the file must exist and be a regular file, not a link or a folder.
+ * @param {unknown} raw
+ * @param {NodeJS.Platform} [platform]
+ */
+function localFilePath(raw, platform = process.platform) {
+  if (typeof raw !== 'string' || !raw || raw.length > 4096 || raw.includes('\u0000')) return null;
+  if (platform === 'win32') {
+    if (!/^[A-Za-z]:[\\/]/.test(raw) || raw.indexOf(':', 2) !== -1) return null;
+  } else if (!raw.startsWith('/') || raw.startsWith('//')) {
+    return null;
+  }
+  const p = (platform === 'win32' ? path.win32 : path.posix).resolve(raw);
+  if (platform === 'win32' ? !/^[A-Za-z]:\\/.test(p) || p.startsWith('\\\\') : p.startsWith('//')) return null;
+  try {
+    const st = fs.lstatSync(p);
+    if (!st.isFile()) return null;
+  } catch {
+    return null;
+  }
+  return p;
+}
+
+module.exports = { attachmentPath, canOpenDirectly, localFilePath };

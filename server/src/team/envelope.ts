@@ -204,7 +204,7 @@ export function instructionsVersion(text: string): string {
 const TRIGGER_MAX = 12_000;
 const CONTEXT_MAX = 1_500;
 
-const RUNTIME_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', dsh: 'DeepSeek Harness', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok', kimi: 'Kimi Code', chat: 'API', mock: 'Mock' };
+const RUNTIME_LABEL: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', dsh: 'DeepSeek Harness', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok', kimi: 'Kimi Code', copilot: 'GitHub Copilot', chat: 'API', mock: 'Mock' };
 
 /** A member working in the same folder: the seqs of the messages its turn handles, or null when in another chat. */
 export interface FolderPeer {

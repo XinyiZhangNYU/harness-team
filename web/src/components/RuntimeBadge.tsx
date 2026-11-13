@@ -12,6 +12,7 @@ export const RUNTIME_NAME: Record<AgentWithStatus['runtimeKind'], string> = {
   cursor: 'Cursor',
   grok: 'Grok',
   kimi: 'Kimi Code',
+  copilot: 'GitHub Copilot',
   chat: 'API',
 };
 
@@ -28,6 +29,7 @@ export function avatarText(runtimeKind: AgentWithStatus['runtimeKind'], displayN
   if (runtimeKind === 'cursor') return 'Cu';
   if (runtimeKind === 'grok') return 'Gk';
   if (runtimeKind === 'kimi') return 'Ki';
+  if (runtimeKind === 'copilot') return 'GH';
   return displayName.slice(0, 1).toUpperCase();
 }
 

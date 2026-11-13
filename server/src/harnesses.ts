@@ -10,6 +10,7 @@ import { type OpenCodeAdapterOptions, type OpenCodeDetection, detectOpenCode } f
 import { type CursorAdapterOptions, type CursorDetection, detectCursor } from './adapters/cursor/adapter.ts';
 import { type GrokAdapterOptions, type GrokDetection, detectGrok } from './adapters/grok/adapter.ts';
 import { type KimiAdapterOptions, type KimiDetection, detectKimi } from './adapters/kimi/adapter.ts';
+import { type CopilotAdapterOptions, type CopilotDetection, detectCopilot } from './adapters/copilot/adapter.ts';
 import { redactText } from './redact.ts';
 
 /**
@@ -29,6 +30,7 @@ export interface DetectedRuntimes {
   cursor: Detected<CursorAdapterOptions> & { detection: CursorDetection | null };
   grok: Detected<GrokAdapterOptions> & { detection: GrokDetection | null };
   kimi: Detected<KimiAdapterOptions> & { detection: KimiDetection | null };
+  copilot: Detected<CopilotAdapterOptions> & { detection: CopilotDetection | null };
 }
 
 export interface DetectOptions {
@@ -46,6 +48,8 @@ export interface DetectOptions {
   grok?: boolean;
   /** Absent = true. */
   kimi?: boolean;
+  /** Absent = true. */
+  copilot?: boolean;
   codexProtocolLog?: string;
   claudeProtocolLog?: string;
   antigravityProtocolLog?: string;
@@ -54,6 +58,7 @@ export interface DetectOptions {
   cursorProtocolLog?: string;
   grokProtocolLog?: string;
   kimiProtocolLog?: string;
+  copilotProtocolLog?: string;
 }
 
 const notice = (x: Localized): NoticeText => (typeof x === 'string' ? L(x, x) : x);
@@ -73,7 +78,7 @@ async function isolated<T>(name: string, detect: () => Promise<T>): Promise<T> {
 
 export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes> {
   await widenPath().catch(() => {});
-  const [codex, claude, antigravity, dsh, opencode, cursor, grok, kimi] = await Promise.all([
+  const [codex, claude, antigravity, dsh, opencode, cursor, grok, kimi, copilot] = await Promise.all([
     o.codex ? isolated('codex', () => detectCodex()) : null,
     o.claude ? isolated('claude', () => detectClaude()) : null,
     o.antigravity !== false ? isolated('agy', () => detectAntigravity()) : null,
@@ -82,6 +87,7 @@ export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes
     o.cursor !== false ? isolated('cursor-agent', () => detectCursor()) : null,
     o.grok !== false ? isolated('grok', () => detectGrok()) : null,
     o.kimi !== false ? isolated('kimi', () => detectKimi()) : null,
+    o.copilot !== false ? isolated('copilot', () => detectCopilot()) : null,
   ]);
   return {
     codex: !codex
@@ -171,6 +177,14 @@ export async function detectRuntimes(o: DetectOptions): Promise<DetectedRuntimes
         : {
             options: { command: kimi.command, argsPrefix: kimi.argsPrefix, version: kimi.version, problem: null, protocolLog: o.kimiProtocolLog },
             detection: kimi,
+          },
+    copilot: !copilot
+      ? { missing: L('已用 --no-copilot 停用', 'Disabled with --no-copilot'), detection: null }
+      : !copilot.command || copilot.error
+        ? { missing: notice(copilot.error ?? L('未找到 copilot', 'copilot was not found')), detection: copilot }
+        : {
+            options: { command: copilot.command, argsPrefix: copilot.argsPrefix, version: copilot.version, problem: null, protocolLog: o.copilotProtocolLog },
+            detection: copilot,
           },
   };
 }

@@ -23,6 +23,7 @@ const { values } = parseArgs({
     'no-cursor': { type: 'boolean', default: false },
     'no-grok': { type: 'boolean', default: false },
     'no-kimi': { type: 'boolean', default: false },
+    'no-copilot': { type: 'boolean', default: false },
   },
 });
 
@@ -45,6 +46,7 @@ const detectOpts = {
   cursor: !values['no-cursor'],
   grok: !values['no-grok'],
   kimi: !values['no-kimi'],
+  copilot: !values['no-copilot'],
   codexProtocolLog: process.env.HT_CODEX_PROTOCOL_LOG || undefined,
   claudeProtocolLog: process.env.HT_CLAUDE_PROTOCOL_LOG || undefined,
   antigravityProtocolLog: process.env.HT_ANTIGRAVITY_PROTOCOL_LOG || undefined,
@@ -53,6 +55,7 @@ const detectOpts = {
   cursorProtocolLog: process.env.HT_CURSOR_PROTOCOL_LOG || undefined,
   grokProtocolLog: process.env.HT_GROK_PROTOCOL_LOG || undefined,
   kimiProtocolLog: process.env.HT_KIMI_PROTOCOL_LOG || undefined,
+  copilotProtocolLog: process.env.HT_COPILOT_PROTOCOL_LOG || undefined,
 };
 const found = await detectRuntimes(detectOpts);
 const codex = found.codex.detection;
@@ -76,7 +79,8 @@ try {
   cursor: found.cursor.options ?? null,
   grok: found.grok.options ?? null,
   kimi: found.kimi.options ?? null,
-  missingRuntimes: { codex: found.codex.missing, claude: found.claude.missing, antigravity: found.antigravity.missing, dsh: found.dsh.missing, opencode: found.opencode.missing, cursor: found.cursor.missing, grok: found.grok.missing, kimi: found.kimi.missing },
+  copilot: found.copilot.options ?? null,
+  missingRuntimes: { codex: found.codex.missing, claude: found.claude.missing, antigravity: found.antigravity.missing, dsh: found.dsh.missing, opencode: found.opencode.missing, cursor: found.cursor.missing, grok: found.grok.missing, kimi: found.kimi.missing, copilot: found.copilot.missing },
   detectRuntimes: () => detectRuntimes(detectOpts),
   secrets: parentPort ? parentPortSecretBox(parentPort) : null,
   });
@@ -153,6 +157,13 @@ if (found.kimi.options) {
   if (process.env.HT_KIMI_PROTOCOL_LOG) console.log(`  Raw Kimi ACP protocol log: ${process.env.HT_KIMI_PROTOCOL_LOG}`);
 } else {
   console.log(`Kimi runtime: not available (${localized(found.kimi.missing!, 'en')})`);
+}
+if (found.copilot.options) {
+  const d = found.copilot.detection!;
+  console.log(`GitHub Copilot runtime: ${d.version ?? 'version reported at initialize'} (${[d.command, ...d.argsPrefix].join(' ')} --acp --stdio) - counts against your Copilot plan's AI Credits (BYOK: your provider)`);
+  if (process.env.HT_COPILOT_PROTOCOL_LOG) console.log(`  Raw Copilot ACP protocol log: ${process.env.HT_COPILOT_PROTOCOL_LOG}`);
+} else {
+  console.log(`GitHub Copilot runtime: not available (${localized(found.copilot.missing!, 'en')})`);
 }
 console.log('Mock agents are simulated.');
 

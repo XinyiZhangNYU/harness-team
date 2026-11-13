@@ -5,7 +5,7 @@ export type { Localized, NoticeText } from './notices.ts';
 // Keep this file free of runtime dependencies so both sides can import it.
 
 /** `chat` = a chat member: Harness Team calls a model API with the user's own key (no external harness). */
-export type RuntimeKind = 'mock' | 'codex' | 'claude' | 'antigravity' | 'dsh' | 'opencode' | 'cursor' | 'grok' | 'kimi' | 'chat';
+export type RuntimeKind = 'mock' | 'codex' | 'claude' | 'antigravity' | 'dsh' | 'opencode' | 'cursor' | 'grok' | 'kimi' | 'copilot' | 'chat';
 
 /**
  * How far other members may orchestrate an Antigravity member (an automatic-orchestration permission, not an auth or
@@ -255,7 +255,7 @@ export const AGENT_AVATAR_MAX = 120_000;
 export const isAgentAvatar = (v: unknown): v is string => typeof v === 'string' && v.length <= AGENT_AVATAR_MAX && AGENT_AVATAR_RE.test(v);
 
 /** Runtimes that can have a default member avatar: shown for that runtime's members without a picture of their own. */
-export const AVATAR_DEFAULT_KINDS = ['claude', 'codex', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi'] as const;
+export const AVATAR_DEFAULT_KINDS = ['claude', 'codex', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'copilot'] as const;
 export type AvatarDefaultKind = (typeof AVATAR_DEFAULT_KINDS)[number];
 /** Chat members take their default avatar per saved model provider: `chat:<ChatProvider.id>`. */
 export type AvatarDefaultKey = AvatarDefaultKind | `chat:${string}`;
@@ -289,6 +289,9 @@ export type RuntimeBilling = 'subscription' | 'metered_api';
  * - Kimi Code: its ACP session mode: default (asks before edits and commands), plan (read-only planning), auto
  *   (Kimi approves what it considers safe and asks for the rest) or yolo (approves everything). Offered only when
  *   `kimi acp` reports them.
+ * - GitHub Copilot CLI: its ACP session mode (`copilot --acp` reports them as session-mode URLs ending in #agent,
+ *   #plan, #autopilot): agent (tools ask through session/request_permission), plan (plans before acting) or autopilot
+ *   (Copilot turns on allow-all and runs to completion without asking). Offered only when Copilot reports them.
  * - Chat members: Harness Team runs their tools itself and asks itself: read-only (the read tools at most; also when
  *   nothing is chosen), manual (every file write and command asks), acceptEdits (file writes inside the project run,
  *   commands ask) or full-access (nothing asks, no sandbox). Writes and commands need the chat's project folder.
@@ -303,6 +306,7 @@ export type AntigravityPermissionMode = 'default' | 'accept-edits' | 'plan' | 's
 export type OpenCodePermissionMode = 'build' | 'plan';
 export type CursorPermissionMode = 'agent' | 'plan' | 'ask';
 export type KimiPermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
+export type CopilotPermissionMode = 'agent' | 'plan' | 'autopilot';
 export type ChatPermissionMode = 'read-only' | 'manual' | 'acceptEdits' | 'full-access';
 export type PermissionMode =
   | ClaudePermissionMode
@@ -311,6 +315,7 @@ export type PermissionMode =
   | OpenCodePermissionMode
   | CursorPermissionMode
   | KimiPermissionMode
+  | CopilotPermissionMode
   | ChatPermissionMode;
 export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = {
   claude: ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
@@ -322,11 +327,12 @@ export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = 
   // `grok agent stdio` reports no session modes and ignores plan: Grok's own permission setting applies.
   grok: [],
   kimi: ['default', 'plan', 'auto', 'yolo'],
+  copilot: ['agent', 'plan', 'autopilot'],
   mock: [],
   chat: ['read-only', 'manual', 'acceptEdits', 'full-access'],
 };
 /** Modes in which nothing asks for approval at all. Choosing one needs `acknowledgePermissionRisk`. */
-export const RISKY_PERMISSION_MODES: readonly PermissionMode[] = ['bypassPermissions', 'full-access', 'skip-permissions', 'yolo'];
+export const RISKY_PERMISSION_MODES: readonly PermissionMode[] = ['bypassPermissions', 'full-access', 'skip-permissions', 'yolo', 'autopilot'];
 /** Version of the warning shown before a risky mode is chosen; a new text gets a new version. */
 export const PERMISSION_WARNING_VERSION = 'perm-skip-2026-11-08';
 
@@ -756,7 +762,7 @@ export function parseSlashCommand(text: string): { handle: string; name: string;
  * - claude-native-cli: user's unmodified `claude` CLI in -p stream-json mode (claude.ai subscription login)
  * - claude-agent-sdk-api: planned, Claude Agent SDK with the user's own Console API key (not implemented)
  */
-export type RuntimeBackend = 'mock' | 'codex-app-server' | 'claude-native-cli' | 'claude-agent-sdk-api' | 'antigravity-acp' | 'dsh-acp' | 'opencode-acp' | 'cursor-acp' | 'grok-acp' | 'kimi-acp' | 'chat-api';
+export type RuntimeBackend = 'mock' | 'codex-app-server' | 'claude-native-cli' | 'claude-agent-sdk-api' | 'antigravity-acp' | 'dsh-acp' | 'opencode-acp' | 'cursor-acp' | 'grok-acp' | 'kimi-acp' | 'copilot-acp' | 'chat-api';
 
 export interface RuntimeDescriptor {
   kind: RuntimeKind;

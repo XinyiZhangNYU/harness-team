@@ -95,7 +95,7 @@ export function ContextMenu(props: { x: number; y: number; items: MenuItem[]; la
             type="button"
             role={it.checked === undefined ? 'menuitem' : it.toggle ? 'menuitemcheckbox' : 'menuitemradio'}
             aria-checked={it.checked === undefined ? undefined : it.checked}
-            className={[it.danger ? 'danger' : '', it.checked === undefined ? '' : 'choice', it.checked ? 'checked' : ''].filter(Boolean).join(' ') || undefined}
+            className={[it.danger ? 'danger' : '', it.checked === undefined ? '' : it.toggle ? 'toggle' : 'choice', it.checked ? 'checked' : ''].filter(Boolean).join(' ') || undefined}
             disabled={it.disabled}
             title={it.title}
             onClick={() => {

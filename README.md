@@ -8,7 +8,7 @@ A local multi-agent group chat for coding agents. Put several coding agent CLIs 
 
 ## Features
 
-- **Native harnesses.** Each agent CLI, such as Antigravity (`agy acp`), DeepSeek Harness (`dsh --profile acp`), OpenCode (`opencode acp`), Cursor (`cursor-agent acp`), Grok (`grok agent stdio`) or Kimi Code (`kimi acp`), keeps its own tools, sessions, `AGENTS.md`, skills, MCP servers and hooks.
+- **Native harnesses.** Each agent CLI, such as Antigravity (`agy acp`), DeepSeek Harness (`dsh --profile acp`), OpenCode (`opencode acp`), Cursor (`cursor-agent acp`), Grok (`grok agent stdio`), Kimi Code (`kimi acp`) or GitHub Copilot CLI (`copilot --acp --stdio`), keeps its own tools, sessions, `AGENTS.md`, skills, MCP servers and hooks.
 - **Chat members.** Paid-API models that talk in the room without being a coding agent: they can read the chat's project folder and search the web if you allow it, but never write files or run commands. See [Chat members](#chat-members).
 - **Approvals in the chat.** Native permission requests appear as cards in the room. Only your click approves; messages from agents, timeouts and restarts never do.
 - **Agents talk to each other.** An @mention in an agent's reply wakes that member. A built-in `harness_team` MCP tool lets agents post progress and ask for a review. Auto relay can be paused or limited per room.
@@ -45,6 +45,7 @@ Each harness is optional. A harness that is missing, too old or not signed in is
 | Cursor | — | Cursor's CLI installer (Windows: `irm 'https://cursor.com/install?win32=true' \| iex`; macOS / Linux: `curl https://cursor.com/install -fsS \| bash`) | `cursor-agent login` |
 | Grok | — | xAI's Grok CLI installer (installs to `~/.grok/bin`) | `grok login` |
 | Kimi Code | — | Kimi Code's official installer (installs to `~/.kimi-code/bin`) | Run `kimi` and log in with `/login`. Needs a Kimi membership that includes Kimi Code. |
+| GitHub Copilot CLI | — | `winget install GitHub.Copilot`, `brew install copilot-cli` or `npm i -g @github/copilot` (Node 22+) | `copilot login`. Copilot Free / Student use the monthly free AI Credits (Auto model only); paid plans use their included AI Credits, then bill only within an additional-usage budget you set on GitHub; BYOK providers bill you per token. |
 
 Billing follows each harness's own login. A member runs the way the CLI runs in your terminal, with the same login and environment variables, so usage counts against that account's plan and limits. Harness Team never reads, stores or forwards your credentials, and it doesn't charge, proxy or meter anything. Several agents working together use up a plan's limits faster, and if your account has paid overage turned on, the harness bills it under your account's rules.
 
@@ -52,7 +53,7 @@ If a harness is signed in with an API key or a cloud provider (for example `GEMI
 
 DeepSeek Harness bills every request per token to your DeepSeek account. OpenCode bills by the provider of the model you pick; its hosted free models cost nothing but send your code to OpenCode's service. Members of both are marked as billed per token.
 
-To use a CLI that is not on `PATH`, set `HT_ANTIGRAVITY_PATH`, `HT_DSH_PATH`, `HT_OPENCODE_PATH`, `HT_CURSOR_PATH`, `HT_GROK_PATH` or `HT_KIMI_PATH`.
+To use a CLI that is not on `PATH`, set `HT_ANTIGRAVITY_PATH`, `HT_DSH_PATH`, `HT_OPENCODE_PATH`, `HT_CURSOR_PATH`, `HT_GROK_PATH`, `HT_KIMI_PATH` or `HT_COPILOT_PATH`.
 
 ## Chat members
 
@@ -106,4 +107,4 @@ Tested on macOS 14 (Apple silicon). Linux should work from source but has not be
 
 [Apache License 2.0](LICENSE). Third-party notices are in [NOTICE](NOTICE) and [docs/THIRD_PARTY_LICENSES.md](docs/THIRD_PARTY_LICENSES.md).
 
-Harness Team is an independent project. It is not affiliated with or endorsed by Anthropic, OpenAI, Google, DeepSeek, Zhipu or OpenCode. The agent CLIs are separate programs that you install and sign in to yourself; they are not included.
+Harness Team is an independent project. It is not affiliated with or endorsed by Anthropic, OpenAI, Google, GitHub, DeepSeek, Zhipu or OpenCode. The agent CLIs are separate programs that you install and sign in to yourself; they are not included.

@@ -267,7 +267,7 @@ function PermissionField(props: {
   // A saved mode this build does not offer (cannot normally happen) stays visible instead of silently changing.
   const unknown = value && !modes.includes(value as PermissionMode);
   const help = value
-    ? ((chat || props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' || props.runtimeKind === 'kimi' ? `permHelp.${props.runtimeKind}.${value}` : `permHelp.${value}`) as Parameters<TFunc>[0])
+    ? ((chat || props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' || props.runtimeKind === 'kimi' || props.runtimeKind === 'copilot' ? `permHelp.${props.runtimeKind}.${value}` : `permHelp.${value}`) as Parameters<TFunc>[0])
     : 'permHelp.follow';
   const general = chat ? t('perm.chatHelp') : t('perm.help', { runtime });
   return (
@@ -1241,6 +1241,9 @@ function NewAgentForm(props: {
   const available = offered.filter(runtimeUsable);
   const autoPick = autoPickRuntime(available);
   const [detecting, setDetecting] = useState(false);
+  /** The harnesses that cannot be used yet are listed on their own page of the form. */
+  const [unusablePage, setUnusablePage] = useState(false);
+  const unusable = offered.filter((r) => !runtimeUsable(r));
   /** Counts finished detections: the Core then forgets its model catalogs, so the form asks for them again. */
   const [detected, setDetected] = useState(0);
   // Default to the first real runtime that is ready; Mock only when nothing else is (dev builds).
@@ -1298,7 +1301,7 @@ function NewAgentForm(props: {
     !!handleErr ||
     (isChat && (!chatCfg.providerId || !chatCfg.model));
 
-  useEffect(() => props.onCanSubmit(!blocked), [blocked]);
+  useEffect(() => props.onCanSubmit(!blocked && !unusablePage), [blocked, unusablePage]);
 
   // Look for the CLIs again (installed or logged in since start); the result also arrives as runtimes.updated.
   const detect = () => {
@@ -1333,18 +1336,32 @@ function NewAgentForm(props: {
     setCfg({ model: '', effort: '' });
   }
 
+  const redetectButton = (
+    <button type="button" className="icon-btn" title={t('add.redetect')} aria-label={t('add.redetect')} aria-busy={detecting} disabled={detecting} onClick={detect}>
+      {detecting ? <span className="spinner" aria-hidden="true" /> : <Icon name="refresh" size={14} />}
+    </button>
+  );
+  /** Not usable yet: one compact line each, with what is missing. */
+  const unusableList = <div className="choice-grid compact">{unusable.map(runtimeChoice)}</div>;
   const typeField = (
     <div className="field">
       <div className="field-head">
         <span className="field-label">{t('add.type')}</span>
-        <button type="button" className="icon-btn" title={t('add.redetect')} aria-label={t('add.redetect')} aria-busy={detecting} disabled={detecting} onClick={detect}>
-          {detecting ? <span className="spinner" aria-hidden="true" /> : <Icon name="refresh" size={14} />}
-        </button>
+        {redetectButton}
       </div>
       <div role="radiogroup" aria-label={t('add.type')} className="runtime-choices">
         {available.length > 0 && <div className="choice-grid">{available.map(runtimeChoice)}</div>}
-        {/* Not usable yet: one compact line each, with what is missing. */}
-        {available.length < offered.length && <div className="choice-grid compact">{offered.filter((r) => !runtimeUsable(r)).map(runtimeChoice)}</div>}
+        {available.length === 0
+          ? unusableList
+          : unusable.length > 0 && (
+              <button type="button" className="choice unusable-link" onClick={() => setUnusablePage(true)}>
+                <span className="choice-main">
+                  <span className="choice-title">{t('add.unusable')}</span>
+                  <span className="choice-sub">{unusable.length}</span>
+                </span>
+                <Icon name="chevronRight" size={14} />
+              </button>
+            )}
       </div>
     </div>
   );
@@ -1381,6 +1398,21 @@ function NewAgentForm(props: {
 
   // Nothing can run yet: only the harnesses, each with what is missing.
   if (available.length === 0) return <div className="form">{typeField}</div>;
+  if (unusablePage && unusable.length > 0)
+    return (
+      <div className="form">
+        <div className="field">
+          <div className="field-head">
+            <button type="button" className="page-back" onClick={() => setUnusablePage(false)}>
+              <Icon name="chevronLeft" size={14} />
+              {t('add.unusable')}
+            </button>
+            {redetectButton}
+          </div>
+          {unusableList}
+        </div>
+      </div>
+    );
 
   return (
     <form

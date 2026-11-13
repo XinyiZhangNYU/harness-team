@@ -51,6 +51,7 @@ const MEMBER_NAME: Record<RuntimeDescriptor['kind'], string> = {
   cursor: 'Cursor',
   grok: 'Grok',
   kimi: 'Kimi',
+  copilot: 'Copilot',
   chat: 'API',
 };
 

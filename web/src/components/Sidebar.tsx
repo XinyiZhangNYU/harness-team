@@ -17,7 +17,7 @@ export function Sidebar(props: {
   onOpenUsage: () => void;
   onSelect: (id: string) => void;
   /** Rejects with the server's reason. */
-  onCreate: (name: string, projectDir: string | null, agentLanguage: AgentLanguage) => Promise<void>;
+  onCreate: (name: string, projectDir: string | null, agentLanguage: AgentLanguage, parallelInFolder: boolean) => Promise<void>;
   /** Rejects with the server's reason. */
   onUpdate: (roomId: string, patch: RoomPatch) => Promise<void>;
   /** Rejects with the server's reason (e.g. a member is still running in the room). */
@@ -310,7 +310,7 @@ export function groupRooms(rooms: Room[], t: TFunc): RoomGroup[] {
 
 function NewChatDialog(props: {
   projectDir: string | null;
-  onCreate: (name: string, projectDir: string | null, agentLanguage: AgentLanguage) => Promise<void>;
+  onCreate: (name: string, projectDir: string | null, agentLanguage: AgentLanguage, parallelInFolder: boolean) => Promise<void>;
   onClose: () => void;
 }) {
   const { t, lang } = usePrefs();
@@ -318,6 +318,7 @@ function NewChatDialog(props: {
   // Members reply in the UI language unless the user picks the other one.
   const [agentLang, setAgentLang] = useState<AgentLanguage>(lang === 'en' ? 'en' : 'zh');
   const [dir, setDir] = useState(props.projectDir ?? '');
+  const [parallel, setParallel] = useState(false);
   // Picking a folder names the chat after it, until you type a name of your own.
   const [autoName, setAutoName] = useState(true);
   const pickDir = (value: string) => {
@@ -332,7 +333,7 @@ function NewChatDialog(props: {
     setBusy(true);
     setError(null);
     try {
-      await props.onCreate(name.trim(), dir.trim() || null, agentLang);
+      await props.onCreate(name.trim(), dir.trim() || null, agentLang, parallel);
       props.onClose();
     } catch (err) {
       setError(errorText(err));
@@ -381,6 +382,10 @@ function NewChatDialog(props: {
             <option value="en">{t('agentLang.en')}</option>
           </select>
         </div>
+        <label className="check">
+          <input type="checkbox" checked={parallel} onChange={(e) => setParallel(e.target.checked)} />
+          <span>{t('room.parallelInFolder')}</span>
+        </label>
         {error && <div className="error-text">{error}</div>}
       </form>
     </Dialog>

@@ -355,6 +355,8 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
 .context-menu button.danger:hover:not(:disabled) { background: var(--err-soft); filter: none; }
 .context-menu button.choice { padding-left: 26px; position: relative; }
 .context-menu button.checked::before { content: '✓'; position: absolute; left: 9px; }
+.context-menu button.toggle { position: relative; padding-right: 30px; }
+.context-menu button.toggle.checked::before { left: auto; right: 10px; }
 .context-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
 
 /* ---------- welcome ---------- */
@@ -424,6 +426,11 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
 .markdown table { border-collapse: collapse; margin: 0.4em 0; }
 .markdown th, .markdown td { border: 1px solid var(--border); padding: 4px 10px; }
 .markdown a { color: var(--accent); }
+.file-cite { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; margin: 0 1px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--code-bg); color: inherit; font: inherit; font-size: 0.9em; line-height: 1.5; vertical-align: baseline; overflow-wrap: anywhere; }
+button.file-cite { cursor: pointer; }
+button.file-cite:hover { border-color: var(--accent); color: var(--accent); }
+.file-cite svg { flex: none; color: var(--muted); }
+.file-cite-failed { text-decoration: line-through; color: var(--muted); }
 
 .msg-system { align-self: center; max-width: min(720px, 90%); margin: 6px 20px; color: var(--muted); font-size: 12.5px; text-align: center; }
 .msg-system time { margin-left: 4px; opacity: 0.8; }
@@ -630,6 +637,11 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
 .choice-grid.compact .choice-main { flex-direction: row; align-items: baseline; gap: 8px; }
 .choice-grid.compact .choice-title { flex-wrap: nowrap; white-space: nowrap; font-weight: 500; }
 .choice-grid.compact .choice-sub { white-space: nowrap; }
+.choice.unusable-link { justify-content: space-between; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); color: var(--muted); font: inherit; text-align: left; }
+.choice.unusable-link .choice-main { flex-direction: row; align-items: baseline; gap: 8px; }
+.choice.unusable-link .choice-title { font-weight: 500; color: var(--text-2); }
+.page-back { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px 2px 2px; border: 0; border-radius: 6px; background: none; color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.page-back:hover { background: var(--hover); }
 .choice-list { display: flex; flex-direction: column; gap: 6px; }
 .choice { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; cursor: pointer; transition: border-color 0.12s, background 0.12s; }
 .choice:hover { background: var(--hover); }

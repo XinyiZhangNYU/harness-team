@@ -12,7 +12,7 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, powerSaveBlocker, safeStorage, screen, shell, utilityProcess } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
-const { attachmentPath, canOpenDirectly } = require('./attachment-open.cjs');
+const { attachmentPath, canOpenDirectly, localFilePath } = require('./attachment-open.cjs');
 const { readState, restoreBounds, writeState } = require('./window-state.cjs');
 const { keepAwakeWanted, readPrefs, writePrefs } = require('./prefs.cjs');
 const { createUpdater, launchInstaller } = require('./updater.cjs');
@@ -315,6 +315,22 @@ function main() {
         const err = await shell.openPath(p);
         if (!err) return { ok: true, revealed: false };
         log.write(`[shell] open attachment failed: ${err}`);
+      }
+      shell.showItemInFolder(p);
+      return { ok: true, revealed: true };
+    });
+    // A file a member cited in its reply: same rules as attachments, for a plain local path (localFilePath).
+    ipcMain.removeHandler('ht:local-file');
+    ipcMain.handle('ht:local-file', async (event, action, raw) => {
+      const from = event.senderFrame && event.senderFrame.url;
+      if (!win || event.sender !== win.webContents || !from || !from.startsWith(origin + '/')) return { ok: false, error: 'denied' };
+      if (action !== 'open' && action !== 'reveal') return { ok: false, error: 'denied' };
+      const p = localFilePath(raw);
+      if (!p) return { ok: false, error: 'missing' };
+      if (action === 'open' && canOpenDirectly(p)) {
+        const err = await shell.openPath(p);
+        if (!err) return { ok: true, revealed: false };
+        log.write(`[shell] open cited file failed: ${err}`);
       }
       shell.showItemInFolder(p);
       return { ok: true, revealed: true };

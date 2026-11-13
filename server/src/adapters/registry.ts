@@ -85,6 +85,16 @@ const PLANNED: Record<Exclude<RuntimeKind, 'mock'>, RuntimeDescriptor> = {
     requiresWorkspace: true,
     capabilities: NO_CAPABILITIES,
   },
+  copilot: {
+    kind: 'copilot',
+    label: 'GitHub Copilot',
+    isMock: false,
+    available: false,
+    installed: false,
+    note: L('未启用：本次启动未注册 GitHub Copilot 运行时（未找到 copilot，或使用了 --no-copilot）。', 'Not enabled: no GitHub Copilot runtime was registered in this run (copilot was not found, or --no-copilot was used).'),
+    requiresWorkspace: true,
+    capabilities: NO_CAPABILITIES,
+  },
   cursor: {
     kind: 'cursor',
     label: 'Cursor',
@@ -131,7 +141,7 @@ export class AdapterRegistry {
   }
 
   describeAll(): RuntimeDescriptor[] {
-    const kinds: RuntimeKind[] = ['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'chat'];
+    const kinds: RuntimeKind[] = ['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'copilot', 'chat'];
     return kinds.map((k) => {
       const a = this.adapters.get(k);
       if (a) return a.describe();

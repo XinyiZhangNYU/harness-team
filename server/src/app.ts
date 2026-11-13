@@ -13,6 +13,7 @@ import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencod
 import { CursorAdapter, type CursorAdapterOptions } from './adapters/cursor/adapter.ts';
 import { GrokAdapter, type GrokAdapterOptions } from './adapters/grok/adapter.ts';
 import { KimiAdapter, type KimiAdapterOptions } from './adapters/kimi/adapter.ts';
+import { CopilotAdapter, type CopilotAdapterOptions } from './adapters/copilot/adapter.ts';
 import { ClaudeAdapter, type ClaudeAdapterOptions } from './adapters/claude/adapter.ts';
 import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex/adapter.ts';
 import { MockAdapter } from './adapters/mock.ts';
@@ -40,7 +41,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.12.3';
+export const SERVER_VERSION = '0.13.0';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -71,8 +72,10 @@ export interface AppOptions {
   grok?: GrokAdapterOptions | null;
   /** Register Kimi Code through its official ACP runtime (`kimi acp`). Omitted = unavailable. */
   kimi?: KimiAdapterOptions | null;
+  /** Register GitHub Copilot CLI through its official ACP runtime (`copilot --acp --stdio`). Omitted = unavailable. */
+  copilot?: CopilotAdapterOptions | null;
   /** Why a real runtime has no adapter at start (shown on its card in the add-member form). */
-  missingRuntimes?: { codex?: NoticeText; claude?: NoticeText; antigravity?: NoticeText; dsh?: NoticeText; opencode?: NoticeText; cursor?: NoticeText; grok?: NoticeText; kimi?: NoticeText };
+  missingRuntimes?: { codex?: NoticeText; claude?: NoticeText; antigravity?: NoticeText; dsh?: NoticeText; opencode?: NoticeText; cursor?: NoticeText; grok?: NoticeText; kimi?: NoticeText; copilot?: NoticeText };
   /** Detects the CLIs again (POST /api/runtimes/detect), so installing or logging in needs no restart. */
   detectRuntimes?: () => Promise<DetectedRuntimes>;
   /** Serve the built-in Team MCP to real runtimes (default true). */
@@ -118,8 +121,9 @@ const CreateRoom = z.object({
   name: z.string(),
   projectDir: z.string().max(1000).nullable().optional(),
   agentLanguage: AgentLanguageSchema.optional(),
+  parallelInFolder: z.boolean().optional(),
 });
-const RuntimeKindSchema = z.enum(['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'chat']);
+const RuntimeKindSchema = z.enum(['mock', 'codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'copilot', 'chat']);
 /** Any mode a runtime offers (PERMISSION_MODES); the Core checks it belongs to the member's runtime. */
 const PermissionModeSchema = z.enum([
   'manual',
@@ -140,6 +144,7 @@ const PermissionModeSchema = z.enum([
   'agent',
   'ask',
   'yolo',
+  'autopilot',
 ]);
 const CreateAgent = z.object({
   handle: z.string().max(100).nullable().optional(),
@@ -272,10 +277,11 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
   if (opts.cursor) registry.register(new CursorAdapter(opts.cursor));
   if (opts.grok) registry.register(new GrokAdapter(opts.grok));
   if (opts.kimi) registry.register(new KimiAdapter(opts.kimi));
+  if (opts.copilot) registry.register(new CopilotAdapter(opts.copilot));
   const chatProviders = new ChatProviders(db, new KeyFiles(opts.dataDir, opts.secrets ?? null));
   let chatHost: ChatHost | null = null;
   registry.register(new ChatAdapter({ db, providers: chatProviders, dataDir: opts.dataDir, host: () => chatHost, idleMs: opts.chatIdleMs, fetchAllowPrivate: opts.chatFetchAllowPrivate }));
-  for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi'] as const) {
+  for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'copilot'] as const) {
     const why = opts.missingRuntimes?.[kind];
     if (why && !registry.get(kind)) registry.setMissing(kind, why);
   }
@@ -360,6 +366,13 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       registry.setMissing('kimi', null);
     } else if (km instanceof KimiAdapter) km.update({ problem: found.kimi.missing });
     else registry.setMissing('kimi', found.kimi.missing);
+    const cp = registry.get('copilot');
+    if (found.copilot.options) {
+      if (cp instanceof CopilotAdapter) cp.update(found.copilot.options);
+      else registry.register(new CopilotAdapter(found.copilot.options));
+      registry.setMissing('copilot', null);
+    } else if (cp instanceof CopilotAdapter) cp.update({ problem: found.copilot.missing });
+    else registry.setMissing('copilot', found.copilot.missing);
     core.runtimesChanged();
     bus.publish({ type: 'runtimes.updated', runtimes: registry.describeAll() });
   }
@@ -467,7 +480,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       if (method === 'GET') return sendJson(res, 200, { rooms: core.listRooms() });
       if (method === 'POST') {
         const body = CreateRoom.parse(await readJson(req));
-        return sendJson(res, 201, { room: core.createRoom(body.name, body.projectDir, body.agentLanguage) });
+        return sendJson(res, 201, { room: core.createRoom(body.name, body.projectDir, body.agentLanguage, body.parallelInFolder === true) });
       }
     }
     if (a === 'rooms' && b && !c && method === 'GET') {

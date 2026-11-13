@@ -13,6 +13,8 @@ interface Window {
       action: 'open' | 'reveal',
       ref: { roomId: string; id: string; name: string },
     ): Promise<{ ok: true; revealed: boolean } | { ok: false; error: 'denied' | 'missing' }>;
+    /** Same as `attachment`, for a file a member cited by absolute path (absent in shells built before 0.12.4). */
+    localFile?(action: 'open' | 'reveal', path: string): Promise<{ ok: true; revealed: boolean } | { ok: false; error: 'denied' | 'missing' }>;
     /** The application menu (absent in shells built before it). Height of the title bar the page draws; 0 = none. */
     titleBarHeight?: number;
     /** Menu commands for the page (see desktop/electron/menu.cjs); returns the unsubscribe function. */

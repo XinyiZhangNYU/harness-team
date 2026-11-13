@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { noticeCode } from '../../../shared/notices.ts';
@@ -6,7 +6,8 @@ import type { AgentWithStatus, DeliveryInfo, Message, MessageIntent } from '../.
 import { initial } from '../avatar.ts';
 import { formatTime, fullTime, splitNotice } from '../format.ts';
 import { usePrefs, type TFunc, useNoticeText } from '../i18n.tsx';
-import { AttachmentGrid } from './Attachments.tsx';
+import { CITATION_HREF, extractCitations } from '../file-citations.ts';
+import { AttachmentGrid, FileCitationChip } from './Attachments.tsx';
 import { DeliveryChips } from './DeliveryChips.tsx';
 import { AgentAvatar, RuntimeBadge } from './RuntimeBadge.tsx';
 import { ActivityItem, ApprovalCard, SessionChoiceCard } from './RuntimeEvents.tsx';
@@ -19,6 +20,29 @@ const intentLabel = (t: TFunc, i: MessageIntent) => t(`intent.${i}`);
 
 /** Markdown images show their alt text instead of being fetched. */
 export const NO_IMAGES: Components = { img: ({ alt }) => (alt ? <span>{alt}</span> : null) };
+
+/** A message body; Codex file citations become file chips (file-citations.ts). */
+function MessageMarkdown({ body, workspace }: { body: string; workspace: string | null | undefined }) {
+  const { text, citations } = useMemo(() => extractCitations(body), [body]);
+  const components = useMemo<Components>(
+    () =>
+      citations.length
+        ? {
+            ...NO_IMAGES,
+            a: ({ href, children, node: _node, ...rest }) => {
+              const c = href?.startsWith(CITATION_HREF) ? citations[Number(href.slice(CITATION_HREF.length))] : undefined;
+              return c ? <FileCitationChip citation={c} workspace={workspace} /> : <a href={href} {...rest}>{children}</a>;
+            },
+          }
+        : NO_IMAGES,
+    [citations, workspace],
+  );
+  return (
+    <Markdown remarkPlugins={[remarkGfm]} components={components}>
+      {text}
+    </Markdown>
+  );
+}
 
 export const MessageItem = memo(function MessageItem(props: {
   message: Message;
@@ -96,9 +120,7 @@ export const MessageItem = memo(function MessageItem(props: {
           {body ? (
             // react-markdown does not render raw HTML by default. Images are not loaded at all: a same-origin URL would be
             // requested with the session cookie as soon as a member's reply shows (CSP only blocks remote ones).
-            <Markdown remarkPlugins={[remarkGfm]} components={NO_IMAGES}>
-              {body}
-            </Markdown>
+            <MessageMarkdown body={body} workspace={sender?.workspace} />
           ) : (
             <span className="muted">…</span>
           )}

@@ -276,8 +276,8 @@ export function App() {
         onOpenSettings={() => setShowSettings(true)}
         onOpenUsage={() => setShowUsage(true)}
         onSelect={(roomId) => dispatch({ type: 'select', roomId })}
-        onCreate={async (name, projectDir, agentLanguage) => {
-          const r = await api.createRoom(name, projectDir, agentLanguage);
+        onCreate={async (name, projectDir, agentLanguage, parallelInFolder) => {
+          const r = await api.createRoom(name, projectDir, agentLanguage, parallelInFolder);
           dispatch({ type: 'event', event: { type: 'room.created', eventSeq: 0, room: r } });
           dispatch({ type: 'select', roomId: r.id });
         }}
