@@ -1,4 +1,5 @@
 import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
+import { lookup as dnsLookupAll } from 'node:dns/promises';
 import { type IncomingMessage, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
@@ -97,6 +98,30 @@ export interface FetchOptions {
   /** Tests only: lets loopback addresses through. */
   allowPrivate?: boolean;
   timeoutMs?: number;
+}
+
+const privateHosts = new Map<string, { at: number; blocked: boolean }>();
+
+/**
+ * Whether a host name is this computer or the local network: a private address literal, a localhost-like name, or a
+ * name that resolves to such an address (any of its addresses). For the browser, which resolves names itself. Cached
+ * for a minute; a name that does not resolve counts as public (the browser cannot open it either).
+ */
+export async function privateHost(hostname: string): Promise<boolean> {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (isIP(host)) return blockedAddress(host);
+  if (/^localhost$|\.localhost$|\.local$|\.internal$/.test(host)) return true;
+  const hit = privateHosts.get(host);
+  if (hit && Date.now() - hit.at < 60_000) return hit.blocked;
+  let blocked = false;
+  try {
+    blocked = (await dnsLookupAll(host, { all: true })).some((a) => blockedAddress(a.address));
+  } catch {
+    blocked = false;
+  }
+  if (privateHosts.size > 500) privateHosts.clear();
+  privateHosts.set(host, { at: Date.now(), blocked });
+  return blocked;
 }
 
 /** The URL a model gave, checked: http or https, no user name or password, no private address literal. */

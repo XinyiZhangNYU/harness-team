@@ -104,6 +104,8 @@ export function ChatView(props: {
   onOpenMember?: (agentId: string) => void;
   onSend: (body: string, clientMessageId: string, attachmentIds: string[], steer: boolean, quotedFrom: string[]) => Promise<SteerSkip[]>;
   onError: (err: unknown) => void;
+  /** Loads the page before `beforeSeq` into the chat; resolves whether there may be more before it. */
+  onLoadOlder?: (beforeSeq: number) => Promise<boolean>;
   /** The live connection to the server is down (it reconnects on its own). */
   offline?: boolean;
   /** Small windows: the chat list and the members are drawers opened from the header. */
@@ -162,6 +164,43 @@ export function ChatView(props: {
     const el = listRef.current;
     if (el && stickRef.current) el.scrollTop = el.scrollHeight;
   });
+
+  // Scrolling back: near the top, the page before the oldest loaded message is loaded, and the message that was at the
+  // top of the view stays where it was. `doneBefore`: nothing is older than this seq (null: not known yet).
+  const older = useRef<{ roomId: string; loading: boolean; doneBefore: number | null }>({ roomId: props.room.id, loading: false, doneBefore: null });
+  const anchorRef = useRef<{ seq: string; offset: number } | null>(null);
+  if (older.current.roomId !== props.room.id) {
+    older.current = { roomId: props.room.id, loading: false, doneBefore: null };
+    anchorRef.current = null;
+  }
+  const loadOlder = () => {
+    const el = listRef.current;
+    const first = props.messages?.[0];
+    const st = older.current;
+    const load = props.onLoadOlder;
+    if (!el || !first || !load || st.loading || (st.doneBefore !== null && first.seq <= st.doneBefore)) return;
+    const top = el.getBoundingClientRect().top;
+    const shown = Array.from(el.querySelectorAll<HTMLElement>('[data-seq]')).find((n) => n.getBoundingClientRect().bottom > top);
+    anchorRef.current = shown ? { seq: shown.dataset.seq!, offset: shown.getBoundingClientRect().top - top } : null;
+    st.loading = true;
+    load(first.seq)
+      .then((more) => {
+        if (!more) st.doneBefore = first.seq;
+      }, onErrorNow.current)
+      .finally(() => {
+        st.loading = false;
+      });
+  };
+  const firstSeq = props.messages?.[0]?.seq;
+  useLayoutEffect(() => {
+    const a = anchorRef.current;
+    const el = listRef.current;
+    if (!a || !el) return;
+    const n = el.querySelector<HTMLElement>(`[data-seq="${a.seq}"]`);
+    if (!n) return;
+    anchorRef.current = null;
+    el.scrollTop += n.getBoundingClientRect().top - el.getBoundingClientRect().top - a.offset;
+  }, [firstSeq]);
 
   // An approval asked for from the menu: centered once its card is rendered (the chat may still be loading).
   const focusedRef = useRef(0);
@@ -234,6 +273,15 @@ export function ChatView(props: {
       onErrorNow.current(err);
     }
   }, []);
+  // A queued message of the user's can be added to the running turn; members it cannot go to are shown by the composer.
+  const steerSkipsRef = useRef<((skips: SteerSkip[]) => void) | null>(null);
+  const steerQueued = useCallback(async (m: Message) => {
+    try {
+      steerSkipsRef.current?.((await api.steerQueuedMessage(m.id)).queued);
+    } catch (err) {
+      onErrorNow.current(err);
+    }
+  }, []);
   const [quotePop, setQuotePop] = useState<QuoteAt | null>(null);
   const closeQuote = useCallback(() => setQuotePop(null), []);
   useEffect(closeQuote, [room.id]);
@@ -261,6 +309,8 @@ export function ChatView(props: {
   const onListScroll = () => {
     onScroll();
     if (quotePop) setQuotePop(null);
+    const el = listRef.current;
+    if (el && el.scrollTop < 400) loadOlder();
   };
 
   return (
@@ -411,6 +461,7 @@ export function ChatView(props: {
               agents={props.agents}
               showAvatar={showAvatar}
               onWithdraw={withdraw}
+              onSteer={steerQueued}
             />,
             ...changesAfter([m]),
           ];
@@ -431,6 +482,7 @@ export function ChatView(props: {
         key={room.id}
         quoteRef={quoteRef}
         editRef={editRef}
+        steerSkipsRef={steerSkipsRef}
         roomId={room.id}
         history={history}
         roomName={room.name}

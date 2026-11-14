@@ -1051,6 +1051,11 @@ export interface SteerSkip {
   reason: 'unsupported' | 'elsewhere';
 }
 
+/** A queued message the user added to the running turn: the members it could not go to now (it stays queued for them). */
+export interface SteerQueuedResponse {
+  queued: SteerSkip[];
+}
+
 export interface PostMessageResponse {
   message: Message;
   /** Only for a message sent with `steer`. */
@@ -1065,6 +1070,12 @@ export interface RoomSnapshot {
   deliveries: DeliveryInfo[];
   tasks: Task[];
   schedules: ScheduledTask[];
+}
+
+/** GET /api/rooms/:id/messages?beforeSeq=…: the page before the oldest loaded message, with its deliveries. */
+export interface OlderMessages {
+  messages: Message[];
+  deliveries: DeliveryInfo[];
 }
 
 export interface UpdateRoomRequest {

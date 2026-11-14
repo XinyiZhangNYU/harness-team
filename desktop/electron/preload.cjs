@@ -43,6 +43,14 @@ contextBridge.exposeInMainWorld('harnessDesktop', {
   getKeepAwake: () => ipcRenderer.invoke('ht:keep-awake-get'),
   /** @param {boolean} on @returns {Promise<boolean | null>} the choice now in effect */
   setKeepAwake: (on) => ipcRenderer.invoke('ht:keep-awake-set', on === true),
+  /** Settings → automatic updates: the saved choice (on by default; null where the shell does not update itself). */
+  getAutoUpdate: () => ipcRenderer.invoke('ht:auto-update-get'),
+  /** @param {boolean} on @returns {Promise<boolean | null>} the choice now in effect */
+  setAutoUpdate: (on) => ipcRenderer.invoke('ht:auto-update-set', on === true),
+  /** Settings → open at login, as the system has it (null where the shell does not offer it). */
+  getOpenAtLogin: () => ipcRenderer.invoke('ht:open-at-login-get'),
+  /** @param {boolean} on @returns {Promise<boolean | null>} the state now in effect */
+  setOpenAtLogin: (on) => ipcRenderer.invoke('ht:open-at-login-set', on === true),
   /** In-app update state (null where the shell does not update itself). */
   getUpdate: () => ipcRenderer.invoke('ht:update-get'),
   /** @param {(state: object) => void} listener @returns {() => void} */

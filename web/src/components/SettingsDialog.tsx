@@ -149,29 +149,41 @@ export function SettingsDialog(props: {
           {props.notify === 'unsupported' && <div className="hint">{t('settings.notifyUnsupported')}</div>}
         </div>
       </section>
-      <KeepAwakeSetting />
+      <DesktopCheck label={t('settings.power')} text={t('settings.keepAwake')} get={(d) => d.getKeepAwake} set={(d) => d.setKeepAwake} />
+      <DesktopCheck label={t('settings.updates')} text={t('settings.autoUpdate')} get={(d) => d.getAutoUpdate} set={(d) => d.setAutoUpdate} />
+      <DesktopCheck label={t('settings.startup')} text={t('settings.openAtLogin')} get={(d) => d.getOpenAtLogin} set={(d) => d.setOpenAtLogin} />
     </Dialog>
   );
 }
 
-/** Desktop app only: the shell holds off idle sleep while members run turns (off unless turned on). */
-function KeepAwakeSetting() {
-  const t = useT();
+type DesktopShell = NonNullable<typeof window.harnessDesktop>;
+
+/**
+ * A setting the desktop shell keeps (keep awake, automatic updates, open at login). Shown only where the shell offers
+ * it: an older shell lacks the call, and one that does not offer the setting answers null.
+ */
+function DesktopCheck(props: {
+  label: string;
+  text: string;
+  get: (d: DesktopShell) => (() => Promise<boolean | null>) | undefined;
+  set: (d: DesktopShell) => ((on: boolean) => Promise<boolean | null>) | undefined;
+}) {
   const desktop = window.harnessDesktop;
+  const get = desktop ? props.get(desktop) : undefined;
+  const set = desktop ? props.set(desktop) : undefined;
   const [on, setOn] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
-    desktop?.getKeepAwake?.().then((v) => live && setOn(v), () => undefined);
+    get?.().then((v) => live && setOn(v), () => undefined);
     return () => {
       live = false;
     };
   }, [desktop]);
-  if (!desktop?.getKeepAwake || !desktop.setKeepAwake || on === null) return null;
-  const set = desktop.setKeepAwake;
+  if (!get || !set || on === null) return null;
   return (
     <section className="settings-row">
-      <div className="settings-label">{t('settings.power')}</div>
+      <div className="settings-label">{props.label}</div>
       <div>
         <label className="check">
           <input
@@ -186,7 +198,7 @@ function KeepAwakeSetting() {
                 .finally(() => setBusy(false));
             }}
           />
-          {t('settings.keepAwake')}
+          {props.text}
         </label>
       </div>
     </section>

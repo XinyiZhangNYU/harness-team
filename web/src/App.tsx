@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { pendingApprovals, useAttention, useDesktopNotifications } from './attention.ts';
-import { api, ApiError, connectEvents } from './api.ts';
+import { api, ApiError, connectEvents, ROOM_PAGE } from './api.ts';
 import { initialState, reducer } from './state.ts';
 import type { DeliveryInfo, ScheduledTask, Task } from '../../shared/protocol.ts';
 import { groupRooms, Sidebar } from './components/Sidebar.tsx';
@@ -333,6 +333,11 @@ export function App() {
               (await api.postMessage(room.id, body, clientMessageId, attachmentIds, steer, quotedFrom)).queued ?? []
             }
             onError={report}
+            onLoadOlder={async (beforeSeq) => {
+              const page = await api.olderMessages(room.id, beforeSeq);
+              dispatch({ type: 'older', roomId: room.id, ...page });
+              return page.messages.length >= ROOM_PAGE;
+            }}
           />
         ) : (
           <div className="welcome">

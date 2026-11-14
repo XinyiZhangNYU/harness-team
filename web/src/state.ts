@@ -49,6 +49,7 @@ export type Action =
   | { type: 'bootstrap'; rooms: Room[]; agents: AgentWithStatus[]; runtimes: RuntimeDescriptor[] }
   | { type: 'select'; roomId: string | null }
   | { type: 'snapshot'; snapshot: RoomSnapshot }
+  | { type: 'older'; roomId: string; messages: Message[]; deliveries: DeliveryInfo[] }
   | { type: 'connection'; state: ConnectionState }
   | { type: 'avatarDefaults'; defaults: AvatarDefaults }
   | { type: 'event'; event: ServerEvent };
@@ -85,16 +86,36 @@ export function reducer(state: State, action: Action): State {
     }
     case 'select':
       return { ...state, currentRoomId: action.roomId };
+    case 'older': {
+      // Older messages go in front of the loaded ones (a room that was not loaded, or was left, is not filled in).
+      const list = state.messages[action.roomId];
+      if (!list) return state;
+      const have = new Set(list.map((m) => m.id));
+      const older = action.messages.filter((m) => !have.has(m.id));
+      if (!older.length) return state;
+      const ds = state.deliveries[action.roomId] ?? [];
+      const haveD = new Set(ds.map((d) => d.id));
+      return {
+        ...state,
+        messages: { ...state.messages, [action.roomId]: [...older, ...list].sort((a, b) => a.seq - b.seq) },
+        deliveries: { ...state.deliveries, [action.roomId]: [...action.deliveries.filter((d) => !haveD.has(d.id)), ...ds] },
+      };
+    }
     case 'snapshot': {
       const { room, members, messages, deliveries, tasks, schedules } = action.snapshot;
       const agents = { ...state.agents };
       for (const m of members) agents[m.id] = m;
+      // A fresh snapshot (reconnect, reopening the chat) has the latest page only: older pages scrolled back to stay.
+      const first = messages[0]?.seq;
+      const kept = first === undefined ? [] : (state.messages[room.id] ?? []).filter((m) => m.seq < first);
+      const keptIds = new Set(kept.map((m) => m.id));
+      const keptDeliveries = kept.length ? (state.deliveries[room.id] ?? []).filter((d) => keptIds.has(d.messageId)) : [];
       return {
         ...state,
         agents,
-        messages: { ...state.messages, [room.id]: messages },
+        messages: { ...state.messages, [room.id]: [...kept, ...messages] },
         members: { ...state.members, [room.id]: members.map((m) => m.id) },
-        deliveries: { ...state.deliveries, [room.id]: deliveries },
+        deliveries: { ...state.deliveries, [room.id]: [...keptDeliveries, ...deliveries] },
         tasks: { ...state.tasks, [room.id]: tasks },
         schedules: { ...state.schedules, [room.id]: schedules ?? [] },
         rooms: state.rooms.map((r) => (r.id === room.id ? room : r)),

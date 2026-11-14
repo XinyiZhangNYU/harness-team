@@ -27,6 +27,7 @@ import type {
   Room,
   RoomPatch,
   RoomSnapshot,
+  OlderMessages,
   RuntimeCommand,
   RuntimeKind,
   RuntimeModelCatalog,
@@ -45,6 +46,7 @@ import type {
   PermissionModeAvailability,
   RuntimeBilling,
   SteerSkip,
+  SteerQueuedResponse,
 } from '../../shared/protocol.ts';
 import { errorNotice, L, type Localized, N, type NoticeText, permissionLabel, zhOf, zhText } from '../../shared/notices.ts';
 import { ALL_HANDLE, ATTACHMENT_LIMITS, SCHEDULE_MEMBER_MAX_PER_ROOM, SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES, type ScheduleRepeat, SPEED_RUNTIMES, STANDARD_SPEED, type ChatMemberSettings, DEFAULT_CHAT_MEMBER, COLLAB_WARNING_VERSION, PERMISSION_WARNING_VERSION, RISKY_PERMISSION_MODES, HANDLE_MAX, HANDLE_PATTERN, isAgentAvatar, isAvatarDefaultKey, PERMISSION_MODES, type AvatarDefaults, RESERVED_HANDLES, handleKey, handleLength, parseMentions, parseSlashCommand, unquotePath } from '../../shared/protocol.ts';
@@ -539,6 +541,14 @@ export class Core {
       tasks: this.store.listTasks(roomId),
       schedules: this.store.listSchedules(roomId),
     };
+  }
+
+  /** The page of messages before `beforeSeq` (scrolling back in a chat), with their deliveries. */
+  messagesBefore(roomId: string, beforeSeq: number, limit?: number): OlderMessages {
+    if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
+    const messages = this.store.listMessages(roomId, { beforeSeq, limit });
+    const deliveries = messages.length ? this.store.listRoomDeliveries(roomId, { minSeq: messages[0]!.seq, beforeSeq }) : [];
+    return { messages, deliveries };
   }
 
   messagesAfter(roomId: string, afterSeq: number, limit?: number): Message[] {
@@ -1613,6 +1623,33 @@ export class Core {
   }
 
   /**
+   * The user adds a queued message of theirs to the turn its member is running in this chat now (as if it had been sent
+   * with Ctrl+Enter). Each copy still waiting in a member's queue goes to that member's running turn when its runtime
+   * can take it; the members it cannot go to (`unsupported`, `elsewhere`) are listed and it stays queued for them.
+   */
+  steerQueuedMessage(messageId: string): SteerQueuedResponse {
+    const m = this.store.getMessage(messageId);
+    if (!m) throw new CoreError(404, L('找不到这条消息', 'Message not found'));
+    if (m.senderKind !== 'user' || m.kind !== 'chat' || m.meta?.type === 'withdrawn') {
+      throw new CoreError(400, L('只能插话你自己发出、仍在排队的消息', 'Only your own messages that are still queued can be added to a running turn'));
+    }
+    if (m.meta?.type === 'command') throw new CoreError(400, L('命令不能插话到当前回合', 'A command cannot be added to a running turn'));
+    const waiting = this.store.messageDeliveries(m.id).filter((d) => d.state === 'queued');
+    if (!waiting.length) throw new CoreError(409, L('这条消息已经发出，不能插话', 'This message was already sent; it cannot be added to a running turn'));
+    const queued: SteerSkip[] = [];
+    for (const d of waiting) {
+      const agent = this.store.getAgent(d.agentId);
+      const st = this.state(d.agentId);
+      const at = st.queue.findIndex((x) => x.id === d.id);
+      // Parked (waiting for a decision) or already being prepared for a turn: it goes as it is.
+      if (!agent || at < 0 || this.restrictedDelivery(d)) continue;
+      const [taken] = st.queue.splice(at, 1);
+      if (!this.steerOrQueue(taken!, agent, queued)) st.queue.splice(at, 0, taken!);
+    }
+    return { queued };
+  }
+
+  /**
    * Requests interruption of the agent's current turn. The turn is only reported interrupted once it actually ends.
    * While the agent is still waiting for a shared workspace nothing has been sent to the runtime yet: the wait is
    * cancelled and its queued messages are marked interrupted (not dispatched).
@@ -2488,6 +2525,9 @@ export class Core {
       source,
     );
     const attachments = this.turnAttachments([m]).filter((a) => a.kind === 'image' || agent.runtimeKind === 'chat');
+    // Out of the queue before it is sent: if the app stops before the answer, the restart finds it in flight (outcome
+    // unknown) and does not send it again.
+    this.publishDelivery(this.store.updateDelivery(d.id, { state: 'dispatched' }));
     let answer: SteerAnswer;
     try {
       answer = await session.steer!({ text, messageId: m.id, ...(attachments.length ? { attachments } : {}) });
@@ -2496,8 +2536,12 @@ export class Core {
     }
     const cur = this.store.getDelivery(d.id);
     // Removed meanwhile (the room was cleared or deleted, or the member left).
-    if (cur?.state !== 'queued') return;
-    if (!answer.ok && !answer.unknown) return queue();
+    if (cur?.state !== 'dispatched') return;
+    if (!answer.ok && !answer.unknown) {
+      // Not taken: back in the queue for the next turn.
+      this.publishDelivery(this.store.updateDelivery(d.id, { state: 'queued' }));
+      return queue();
+    }
     if (!answer.ok) {
       // Sent, but whether the turn took it is not known: the runtime may have acted on it, so it is not sent again.
       this.publishDelivery(this.store.updateDelivery(d.id, { state: 'dispatched', replyMessageId: live.slotId(), stamp: 'dispatched' }));

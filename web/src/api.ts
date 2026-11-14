@@ -26,6 +26,7 @@ import type {
   Room,
   RoomPatch,
   RoomSnapshot,
+  OlderMessages,
   RuntimeDescriptor,
   RuntimeKind,
   RuntimeModelCatalog,
@@ -33,6 +34,7 @@ import type {
   SaveChatProviderRequest,
   ServerEvent,
   SteerSkip,
+  SteerQueuedResponse,
   Task,
   TaskStatus,
   UpdateAgentRequest,
@@ -64,6 +66,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return json as T;
 }
 
+/** Messages per page: the latest when a chat opens, and each page loaded when scrolling back. */
+export const ROOM_PAGE = 500;
+
 export const api = {
   browserSettings: () => request<BrowserSettingsResponse>('GET', '/api/browser-settings'),
   kimiWebbridge: () => request<KimiWebbridgeResponse>('GET', '/api/kimi-webbridge'),
@@ -77,7 +82,10 @@ export const api = {
   rooms: () => request<{ rooms: Room[] }>('GET', '/api/rooms').then((r) => r.rooms),
   createRoom: (name: string, projectDir: string | null = null, agentLanguage: AgentLanguage = 'zh', parallelInFolder = false) =>
     request<{ room: Room }>('POST', '/api/rooms', { name, projectDir, agentLanguage, parallelInFolder }).then((r) => r.room),
-  room: (id: string) => request<RoomSnapshot>('GET', `/api/rooms/${id}?limit=500`),
+  room: (id: string) => request<RoomSnapshot>('GET', `/api/rooms/${id}?limit=${ROOM_PAGE}`),
+  /** The page of messages before `beforeSeq` (scrolling back). */
+  olderMessages: (id: string, beforeSeq: number) =>
+    request<OlderMessages>('GET', `/api/rooms/${id}/messages?beforeSeq=${beforeSeq}&limit=${ROOM_PAGE}`),
   deleteRoom: (id: string) => request<{ ok: boolean }>('DELETE', `/api/rooms/${id}`, {}),
   agents: () => request<{ agents: AgentWithStatus[] }>('GET', '/api/agents').then((r) => r.agents),
   createAgent: (req: CreateAgentRequest) =>
@@ -173,6 +181,8 @@ export const api = {
   decideApproval: (messageId: string, decision: ApprovalDecision, answers?: ApprovalAnswers) =>
     request<{ message: Message }>('POST', `/api/approvals/${messageId}`, { decision, ...(answers ? { answers } : {}) }).then((r) => r.message),
   withdrawMessage: (messageId: string) => request<WithdrawMessageResponse>('POST', `/api/messages/${messageId}/withdraw`, {}),
+  /** A queued message of the user's into the running turn (as Ctrl+Enter); `queued` lists the members it still waits for. */
+  steerQueuedMessage: (messageId: string) => request<SteerQueuedResponse>('POST', `/api/messages/${messageId}/steer`, {}),
   chooseSession: (messageId: string, choice: SessionChoiceOption) =>
     request<{ message: Message }>('POST', `/api/session-choices/${messageId}`, { choice }).then((r) => r.message),
 };

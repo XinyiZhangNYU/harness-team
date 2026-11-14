@@ -27,6 +27,7 @@ import { claudeLimitName, L, type Localized, N, NoticeError, type NoticeText, zh
 import {
   cwdKey as dirKey,
   denyText,
+  NO_TURN,
   REQUEST_GONE,
   REQUEST_INTERRUPTED,
   SKILL_NAME,
@@ -44,6 +45,8 @@ import {
   type OpenSessionArgs,
   ResumeFailedError,
   type RuntimeAdapter,
+  type SteerAnswer,
+  type SteerInput,
   type TeamMcpConfig,
   type TurnAttachment,
   type TurnEventSink,
@@ -305,6 +308,8 @@ export interface ClaudeAdapterOptions {
    * itself before the turn is closed with what it has (default 60 s).
    */
   followUpTimeoutMs?: number;
+  /** How long to wait for Claude Code to confirm it queued a message added to the running turn (default 15 s). */
+  steerTimeoutMs?: number;
   /** How long to wait for the `initialize` control response when starting a process. */
   startTimeoutMs?: number;
   /** How long to wait for the killed process to exit before declaring its state unknown (default 5000 ms). */
@@ -380,7 +385,9 @@ export class ClaudeAdapter implements RuntimeAdapter {
         nativeApprovals: true,
         interrupt: true,
         resume: true,
-        steer: false,
+        // A user message written while a turn runs: Claude Code queues it and folds it into that turn between tool
+        // rounds, or runs it by itself right after; either way its reply belongs to this turn (ClaudeTurn.steer).
+        steer: true,
         teamMcp: true,
         standingInstructions: true,
         commands: CLAUDE_COMMANDS,
@@ -964,6 +971,11 @@ class ClaudeSession implements AgentSession {
     }
   }
 
+  steer(input: SteerInput): Promise<SteerAnswer> {
+    if (!this.turn) return Promise.resolve({ ok: false, error: NO_TURN });
+    return this.turn.steer(input);
+  }
+
   respondApproval(nativeRequestId: string, decision: ApprovalDecision, answers?: ApprovalAnswers): ApprovalAnswer {
     if (!this.turn) return { ok: false, error: L('该成员当前没有进行中的回合，请求已失效', 'This member has no turn running; the request is no longer valid') };
     return this.turn.respond(nativeRequestId, decision, answers);
@@ -1178,6 +1190,15 @@ class ClaudeTurn {
   /** A follow-up query is running (its `system/init` arrived after a `result`). */
   private followUp = false;
   private followUpTimer: NodeJS.Timeout | null = null;
+  /** The turn runs a slash command (it takes no added message). */
+  private command = false;
+  /**
+   * Messages the user added while this turn runs, by the uuid they were written with. Claude Code queues each one
+   * (command_lifecycle 'queued') and either folds it into the running query between tool rounds or, when that query
+   * ends first, runs it by itself in a further query; a result lists the uuids it answered (user_message_uuids). The
+   * turn stays open until each one is answered, so its reply reaches the room in this turn and never a later one.
+   */
+  private readonly steered = new Map<string, { state: 'sent' | 'queued' | 'answered' | 'dropped'; answer: ((a: SteerAnswer) => void) | null }>();
 
   private readonly session: ClaudeSession;
   private readonly proc: StreamJsonProcess;
@@ -1197,24 +1218,93 @@ class ClaudeTurn {
     // Images as content blocks of the user message (the Agent SDK's streaming-input shape); other files only by path.
     let images: unknown[];
     try {
-      images = await Promise.all(
-        attachments
-          .filter((a) => a.kind === 'image')
-          .map(async (a) => ({ type: 'image', source: { type: 'base64', media_type: a.mime, data: (await readFile(a.path)).toString('base64') } })),
-      );
+      images = await imageBlocks(attachments);
     } catch (e) {
       return { status: 'failed', error: L('无法读取附件：{error}', 'Could not read an attachment: {error}', { error: (e as Error).message }) };
     }
     const onAbort = () => void this.interrupt();
     this.signal.addEventListener('abort', onAbort, { once: true });
+    this.command = command;
     try {
-      this.proc.send({ type: 'user', message: { role: 'user', content: command ? text : [{ type: 'text', text }, ...images] }, parent_tool_use_id: null });
+      // With a uuid, the results of this turn list the messages they answered (user_message_uuids).
+      this.proc.send({ type: 'user', message: { role: 'user', content: command ? text : [{ type: 'text', text }, ...images] }, parent_tool_use_id: null, uuid: randomUUID() });
       return await this.done;
     } finally {
       this.signal.removeEventListener('abort', onAbort);
       if (this.interruptTimer) clearTimeout(this.interruptTimer);
       if (this.followUpTimer) clearTimeout(this.followUpTimer);
     }
+  }
+
+  /** Adds the user's message to this turn: written now, queued by Claude Code, answered within this turn. */
+  async steer(input: SteerInput): Promise<SteerAnswer> {
+    if (this.command) return { ok: false, error: L('Claude Code 的命令回合不接受插话', 'A Claude Code command turn takes no added message') };
+    let images: unknown[];
+    try {
+      images = await imageBlocks(input.attachments ?? []);
+    } catch (e) {
+      return { ok: false, error: L('无法读取附件：{error}', 'Could not read an attachment: {error}', { error: (e as Error).message }) };
+    }
+    if (this.finished || this.interruptRequested || this.forcing || this.stopping || this.signal.aborted || !this.proc.running) return { ok: false, error: NO_TURN };
+    const uuid = randomUUID();
+    const answer = new Promise<SteerAnswer>((resolve) => this.steered.set(uuid, { state: 'sent', answer: resolve }));
+    this.proc.send({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: input.text }, ...images] }, parent_tool_use_id: null, uuid });
+    const timer = setTimeout(
+      () =>
+        this.steerAnswer(uuid, {
+          ok: false,
+          unknown: true,
+          error: L('Claude Code 未确认收到插话的消息', 'Claude Code did not confirm it received the added message'),
+        }),
+      this.session.adapter.opts.steerTimeoutMs ?? 15_000,
+    );
+    return answer.finally(() => clearTimeout(timer));
+  }
+
+  private steerAnswer(uuid: string, a: SteerAnswer) {
+    const s = this.steered.get(uuid);
+    const resolve = s?.answer;
+    if (!s || !resolve) return;
+    s.answer = null;
+    resolve(a);
+  }
+
+  /** Claude Code took the message (queued, started, folded in or answered by a result). */
+  private steerTaken(uuid: string, answered: boolean) {
+    const s = this.steered.get(uuid);
+    if (!s || s.state === 'answered' || s.state === 'dropped') return;
+    s.state = answered ? 'answered' : 'queued';
+    this.steerAnswer(uuid, { ok: true });
+  }
+
+  /** `command_lifecycle` of a message: only those added with steer are tracked. */
+  private onLifecycle(uuid: string, state: string) {
+    const s = this.steered.get(uuid);
+    if (!s) return;
+    if (state === 'queued' || state === 'started') return this.steerTaken(uuid, false);
+    if (state === 'completed') return this.steerTaken(uuid, true);
+    if (state === 'cancelled' || state === 'discarded' || state === 'refused') {
+      if (s.state === 'answered') return;
+      s.state = 'dropped';
+      this.steerAnswer(uuid, { ok: false, error: L('Claude Code 未接受插话的消息（{state}）', 'Claude Code did not take the added message ({state})', { state }) });
+      // Nothing is left to wait for: the turn ends with what it has.
+      if (this.waiting && !this.followUp && !this.background.size && !this.steerPending()) void this.endStoppingBackground(this.waiting);
+    }
+  }
+
+  /** Added messages Claude Code has not answered yet. */
+  private steerPending(): number {
+    let n = 0;
+    for (const s of this.steered.values()) if (s.state === 'sent' || s.state === 'queued') n++;
+    return n;
+  }
+
+  /** Waits for the query Claude Code starts by itself; should none start, the turn ends with what it has. */
+  private armFollowUp() {
+    if (this.followUpTimer) clearTimeout(this.followUpTimer);
+    this.followUpTimer = setTimeout(() => {
+      if (this.waiting && !this.followUp) void this.endStoppingBackground(this.waiting);
+    }, this.session.adapter.opts.followUpTimeoutMs ?? 60_000);
   }
 
   private emit: TurnEventSink = (ev) => {
@@ -1228,6 +1318,8 @@ class ClaudeTurn {
       this.sink({ type: 'approval.resolved', nativeRequestId: requestId, decision: 'cancelled' });
     }
     this.pending.clear();
+    // A message Claude Code never confirmed goes back to the Core, which queues it for the next turn.
+    for (const uuid of this.steered.keys()) this.steerAnswer(uuid, { ok: false, error: NO_TURN });
     this.finished = true;
     this.finish(this.usage ? { ...r, usage: this.usage } : r);
   }
@@ -1247,7 +1339,10 @@ class ClaudeTurn {
   private async endStoppingBackground(r: TurnResult) {
     if (this.followUpTimer) clearTimeout(this.followUpTimer);
     this.waiting = null;
-    if (this.background.size && !this.finished && !this.forcing) {
+    if ((this.background.size || this.steerPending()) && !this.finished && !this.forcing) {
+      // Added messages still queued go with the process, so Claude Code never answers them in a later turn.
+      const unanswered = [...this.steered.values()].filter((s) => s.state === 'queued' && !s.answer).length;
+      if (unanswered) this.emit(noticeEvent(L('回合已结束，Claude Code 未回复插话的 {n} 条消息', 'The turn ended before Claude Code answered {n} added message(s)', { n: String(unanswered) })));
       const tasks = [...this.background.values()].filter((t): t is string => !!t);
       this.background.clear();
       this.stopping = true;
@@ -1270,12 +1365,7 @@ class ClaudeTurn {
     if (!key) return;
     this.background.delete(key);
     // Claude Code now runs a follow-up query by itself. Should none start, the turn ends with what it has.
-    if (this.waiting && !this.followUp && !this.background.size) {
-      if (this.followUpTimer) clearTimeout(this.followUpTimer);
-      this.followUpTimer = setTimeout(() => {
-        if (this.waiting && !this.followUp) void this.endStoppingBackground(this.waiting);
-      }, this.session.adapter.opts.followUpTimeoutMs ?? 60_000);
-    }
+    if (this.waiting && !this.followUp && !this.background.size) this.armFollowUp();
   }
 
   private async interrupt() {
@@ -1286,7 +1376,8 @@ class ClaudeTurn {
     // The CLI cancels its own pending permission prompts on interrupt (control_cancel_request); anything it
     // leaves open afterwards is denied explicitly. Nothing is ever allowed.
     try {
-      await this.proc.control({ subtype: 'interrupt' }, 15_000);
+      // cancel_queued: messages added to this turn that Claude Code has not taken in yet are cancelled with it.
+      await this.proc.control({ subtype: 'interrupt', cancel_queued: true }, 15_000);
     } catch (e) {
       this.emit(noticeEvent(N('claude.interruptFailed', { error: (e as Error).message })));
     }
@@ -1349,6 +1440,9 @@ class ClaudeTurn {
       }
       case 'result':
         return this.onResult(msg);
+      case 'command_lifecycle':
+        // {type: 'command_lifecycle', command_uuid: <the uuid the message was written with>, state} (2.1.319).
+        return this.onLifecycle(String(msg.command_uuid ?? ''), String(msg.state ?? ''));
       default:
         return;
     }
@@ -1675,13 +1769,16 @@ class ClaudeTurn {
       this.emit(noticeEvent(N('claude.denied', { list: denials.map((d) => mapTool(String(d.tool_name), d.tool_input ?? {}, this.session.cwd).label ?? N('tool.other', { name: String(d.tool_name) })) })));
     }
     this.followUp = false;
+    const answered: unknown = msg.user_message_uuids ?? (msg.user_message_uuid ? [msg.user_message_uuid] : null);
+    if (Array.isArray(answered)) for (const uuid of answered) this.steerTaken(String(uuid), true);
     let r: TurnResult;
     if (msg.subtype === 'success' && !msg.is_error) r = { status: 'completed' };
     else if (this.interruptRequested && (msg.subtype === 'error_during_execution' || /^aborted/.test(String(msg.terminal_reason ?? '')))) r = { status: 'interrupted' };
     else r = { status: 'failed', error: this.describeFailure(msg) };
-    // Background agents still run: Claude Code goes on by itself once they finish, within this turn.
-    if (r.status === 'completed' && !this.interruptRequested && this.background.size) {
+    // Background agents still run, or added messages wait: Claude Code goes on by itself, within this turn.
+    if (r.status === 'completed' && !this.interruptRequested && (this.background.size || this.steerPending())) {
       this.waiting = r;
+      if (!this.background.size) this.armFollowUp();
       return;
     }
     void this.endStoppingBackground(r);
@@ -1715,6 +1812,15 @@ class ClaudeTurn {
     }
     return raw;
   }
+}
+
+/** Images as content blocks of a user message (the Agent SDK's streaming-input shape); other files only by path. */
+function imageBlocks(attachments: TurnAttachment[]): Promise<unknown[]> {
+  return Promise.all(
+    attachments
+      .filter((a) => a.kind === 'image')
+      .map(async (a) => ({ type: 'image', source: { type: 'base64', media_type: a.mime, data: (await readFile(a.path)).toString('base64') } })),
+  );
 }
 
 /** Claude Code task types that are agents (`system/task_started` task_type); shells and monitors are not waited for. */

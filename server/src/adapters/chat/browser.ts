@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { realPath, relativeInside } from '../../path-key.ts';
 import { type AgentLanguage, type ApprovalDecision, DEFAULT_BROWSER_SETTINGS, type BrowserChoice, type BrowserSettings } from '../../../../shared/protocol.ts';
-import { checkUrl, FetchError } from './web-fetch.ts';
+import { checkUrl, FetchError, privateHost } from './web-fetch.ts';
 import { JsonRpcProcess, RpcError } from '../codex/rpc.ts';
 import type { MediaCaps } from './project-tools.ts';
 import type { ToolDef, ToolMedia } from './wire.ts';
@@ -322,6 +322,12 @@ export function browserCallKind(name: BrowserToolName, args: Record<string, unkn
   }
 }
 
+/** A call on the page that is open (act, upload): which page that is gets read again first, as it may have moved by itself. */
+export function actsOnPage(name: BrowserToolName, raw: Record<string, unknown>): boolean {
+  const k = browserCallKind(name, browserArgs(name, raw)).kind;
+  return k === 'act' || k === 'upload';
+}
+
 /** One line for the approval card: what the action does. */
 export function describeBrowserCall(name: BrowserToolName, args: Record<string, unknown>): string {
   const s = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v ?? ''));
@@ -424,7 +430,7 @@ export interface BrowserPlan {
 export function planBrowserCall(
   name: BrowserToolName,
   raw: Record<string, unknown>,
-  ctx: { pageUrl: string | null; workDir: string | null; dataDir: string; allowPrivate: boolean; lang: AgentLanguage; prefs: BrowserSettings },
+  ctx: { pageUrl: string | null; pageHost: string | null; workDir: string | null; dataDir: string; allowPrivate: boolean; lang: AgentLanguage; prefs: BrowserSettings },
 ): BrowserPlan {
   const zh = ctx.lang === 'zh';
   if (name === 'browser_file_upload' && !ctx.prefs.fileUpload) throw new Error('file upload is turned off in the browser settings');
@@ -451,7 +457,7 @@ export function planBrowserCall(
     title = `${name} ${url.href.slice(0, 200)}`;
     detail = url.href;
   } else {
-    host = pageHost(ctx.pageUrl);
+    host = ctx.pageHost;
     detail =
       kind.kind === 'upload'
         ? uploads.map((f) => `${f.path} (${sizeText(f.size)})`).join('\n')
@@ -488,6 +494,71 @@ export interface BrowserResult {
   text: string;
   media: ToolMedia[];
   isError: boolean;
+  /** Playwright's text as it came (browser_tabs: the tab list). */
+  raw: string;
+}
+
+/**
+ * The URL of the current tab in a browser_tabs result (Playwright writes the tab list first, from its own state, not
+ * from page content). A tab line is `- i: (current) [title](url)`; titles are not escaped, so with a `](` in the title
+ * or the URL every reading is returned, and each must pass. null: no tab is open. Throws on anything else.
+ */
+export function currentTabUrls(raw: string): string[] | null {
+  const lines = raw.split('\n');
+  if (lines[0] !== '### Result') throw new Error('no tab list');
+  const body: string[] = [];
+  for (const l of lines.slice(1)) {
+    if (l.startsWith('### ')) break;
+    body.push(l);
+  }
+  if (body[0]?.startsWith('No open tabs')) return null;
+  const current = body.filter((l) => /^- \d+: \(current\) \[/.test(l));
+  if (current.length !== 1) throw new Error('no current tab in the tab list');
+  let rest = current[0]!.replace(/^- \d+: \(current\) \[/, '').replace(/ \[crashed\]$/, '');
+  if (!rest.endsWith(')')) throw new Error('unreadable tab line');
+  rest = rest.slice(0, -1);
+  const urls: string[] = [];
+  for (let i = rest.indexOf(']('); i !== -1; i = rest.indexOf('](', i + 1)) urls.push(rest.slice(i + 2));
+  if (!urls.length) throw new Error('unreadable tab line');
+  return urls;
+}
+
+/** Which pages of a call may reach the model. */
+export interface PageGate {
+  /** No approvals in this mode: only the local network is kept out. */
+  fullAccess: boolean;
+  allowPrivate: boolean;
+  /** The site the user allowed for this call (opened, or acted on), if any. */
+  approvedHost: string | null;
+  /** Sites allowed for the session. */
+  covers: (host: string) => boolean;
+}
+
+/**
+ * Why the page the tab shows may not go to the model, or null. The tab may have left the site that was allowed: a
+ * redirect, a script, a link. Its page then goes to the model only when it is the site allowed for this call, the
+ * page already shown, or a site allowed for the session; never this computer or the local network.
+ */
+export async function pageRefusal(urls: string[], gate: PageGate, shownHost: string | null): Promise<string | null> {
+  for (const raw of urls) {
+    let u: URL | null = null;
+    try {
+      u = new URL(raw);
+    } catch {
+      u = null;
+    }
+    if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) {
+      if (u && (u.protocol === 'about:' || u.protocol === 'chrome-error:')) continue;
+      if (gate.fullAccess) continue;
+      return `the page is at ${raw.slice(0, 200)}, which is not a web page; its content is withheld`;
+    }
+    if (!gate.allowPrivate && (await privateHost(u.hostname))) return `the page went to ${u.host}, which is this computer or the local network; its content is withheld`;
+    if (gate.fullAccess) continue;
+    const host = u.host.toLowerCase();
+    if (host === gate.approvedHost || host === shownHost || gate.covers(host)) continue;
+    return `the page went to ${u.href.slice(0, 300)}, a site the user has not allowed; its content is withheld. To read it, open that URL with browser_navigate (the user is asked).`;
+  }
+  return null;
 }
 
 export interface BrowserProcessOptions {
@@ -508,8 +579,13 @@ const CALL_TIMEOUT_MS = 120_000;
 export class BrowserProcess {
   private rpc: JsonRpcProcess | null = null;
   private starting: Promise<JsonRpcProcess> | null = null;
-  /** URL of the page that is open, from the last result that showed it. */
-  pageUrl: string | null = null;
+  /**
+   * URL of the current tab, from Playwright's tab list (never from page content): one reading, or more when the
+   * tab line is ambiguous. null: no page.
+   */
+  pageUrls: string[] | null = null;
+  /** Host of the page whose content last went to the model. */
+  private shownHost: string | null = null;
   private readonly opts: BrowserProcessOptions;
 
   constructor(opts: BrowserProcessOptions) {
@@ -571,6 +647,69 @@ export class BrowserProcess {
     });
   }
 
+  /** The current tab's URL, for the user to see. */
+  get pageUrl(): string | null {
+    return this.pageUrls?.join('\n') ?? null;
+  }
+
+  /** Host of the current tab, when every reading agrees. */
+  get pageHost(): string | null {
+    const hosts = new Set((this.pageUrls ?? []).map(pageHost));
+    return hosts.size === 1 ? [...hosts][0]! : null;
+  }
+
+  /** Reads the current tab again (when the browser runs). */
+  async readPage(signal: AbortSignal): Promise<void> {
+    if (!this.rpc?.running) {
+      this.pageUrls = null;
+      return;
+    }
+    const r = await this.call('browser_tabs', { action: 'list' }, signal);
+    this.pageUrls = currentTabUrls(r.raw);
+  }
+
+  /**
+   * Before a call: refuses a URL to open, or a page to act on, that is this computer or the local network (a name
+   * may resolve there). Throws a message for the model.
+   */
+  async checkTarget(plan: BrowserPlan, allowPrivate: boolean): Promise<void> {
+    if (allowPrivate || plan.kind.kind === 'observe') return;
+    const urls = plan.kind.kind === 'navigate' ? [String(plan.args.url)] : (this.pageUrls ?? []);
+    for (const raw of urls) {
+      let u: URL;
+      try {
+        u = new URL(raw);
+      } catch {
+        continue;
+      }
+      if ((u.protocol === 'http:' || u.protocol === 'https:') && (await privateHost(u.hostname))) {
+        throw new Error(`${u.host} is this computer or the local network; the browser does not open or act on it`);
+      }
+    }
+  }
+
+  /**
+   * After a call: reads which page the tab shows now and returns why it may not go to the model (null: it may).
+   * browser_tabs answers with the tab list itself.
+   */
+  async checkPage(name: BrowserToolName, r: BrowserResult, gate: PageGate, signal: AbortSignal): Promise<string | null> {
+    if (name === 'browser_close') {
+      this.pageUrls = null;
+      this.shownHost = null;
+      return null;
+    }
+    try {
+      if (name === 'browser_tabs' && !r.isError) this.pageUrls = currentTabUrls(r.raw);
+      else await this.readPage(signal);
+    } catch (e) {
+      this.shownHost = null;
+      return `could not confirm which page is open (${e instanceof Error ? e.message : String(e)}); its content is withheld`;
+    }
+    const refusal = await pageRefusal(this.pageUrls ?? [], gate, this.shownHost);
+    this.shownHost = refusal ? null : this.pageHost;
+    return refusal;
+  }
+
   async call(name: BrowserToolName, args: Record<string, unknown>, signal: AbortSignal): Promise<BrowserResult> {
     const rpc = await this.start();
     const aborted = new Promise<never>((_, reject) => {
@@ -587,10 +726,7 @@ export class BrowserProcess {
       else if (item.type === 'image' && typeof item.data === 'string') media.push({ type: 'image', mime: item.mimeType || 'image/png', data: item.data, name: 'screenshot' });
     }
     const raw = texts.join('\n');
-    const urls = [...raw.matchAll(/^- Page URL: (\S+)/gm)];
-    if (urls.length) this.pageUrl = urls[urls.length - 1]![1]!;
-    if (name === 'browser_close') this.pageUrl = null;
-    return { text: tidy(raw), media, isError: !!r?.isError };
+    return { text: tidy(raw), media, isError: !!r?.isError, raw };
   }
 
   /**
@@ -614,7 +750,8 @@ export class BrowserProcess {
   async close(): Promise<void> {
     const rpc = this.rpc ?? (await this.starting?.catch(() => null)) ?? null;
     this.rpc = null;
-    this.pageUrl = null;
+    this.pageUrls = null;
+    this.shownHost = null;
     await rpc?.close().catch(() => {});
     try {
       rmSync(join(this.opts.outDir, 'uploads'), { recursive: true, force: true });

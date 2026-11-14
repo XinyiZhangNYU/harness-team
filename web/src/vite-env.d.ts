@@ -28,6 +28,12 @@ interface Window {
     /** Settings → keep the computer awake while members work (absent in older shells). */
     getKeepAwake?(): Promise<boolean | null>;
     setKeepAwake?(on: boolean): Promise<boolean | null>;
+    /** Settings → automatic updates (absent in older shells; null where the shell does not update itself). */
+    getAutoUpdate?(): Promise<boolean | null>;
+    setAutoUpdate?(on: boolean): Promise<boolean | null>;
+    /** Settings → open at login (absent in older shells; null where the shell does not offer it). */
+    getOpenAtLogin?(): Promise<boolean | null>;
+    setOpenAtLogin?(on: boolean): Promise<boolean | null>;
     /** In-app updates (installed Windows app; absent in older shells, null state where it does not update itself). */
     getUpdate?(): Promise<DesktopUpdate | null>;
     onUpdate?(listener: (state: DesktopUpdate) => void): () => void;

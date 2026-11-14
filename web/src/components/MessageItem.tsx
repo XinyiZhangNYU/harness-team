@@ -124,6 +124,8 @@ export const MessageItem = memo(function MessageItem(props: {
   showAvatar?: boolean;
   /** Takes back the user's queued message (`edit`: its text goes back to the composer). */
   onWithdraw?: (message: Message, edit: boolean) => void;
+  /** Adds the user's queued message to the running turn (as Ctrl+Enter). */
+  onSteer?: (message: Message) => void;
   /** The sender's working folder in this chat, when it is not its own (Room.memberWorkspaces). */
   senderWorkspace?: string;
 }) {
@@ -136,11 +138,13 @@ export const MessageItem = memo(function MessageItem(props: {
     </time>
   );
   const onWithdraw = props.onWithdraw;
+  const onSteer = props.onSteer;
   const chips = props.deliveries?.length ? (
     <DeliveryChips
       deliveries={props.deliveries}
       agents={props.agents ?? {}}
       onWithdraw={m.senderKind === 'user' && onWithdraw ? (edit) => onWithdraw(m, edit) : undefined}
+      onSteer={m.senderKind === 'user' && m.meta?.type !== 'command' && onSteer ? () => onSteer(m) : undefined}
     />
   ) : null;
   if (m.meta?.type === 'withdrawn') {

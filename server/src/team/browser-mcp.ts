@@ -10,6 +10,7 @@ import {
   browserUnavailable,
   isBrowserTool,
   planBrowserCall,
+  actsOnPage,
   prepareUploads,
 } from '../adapters/chat/browser.ts';
 import type { Core, TeamIdentity } from '../core.ts';
@@ -140,16 +141,21 @@ export function createBrowserMcpHandler(opts: BrowserMcpOptions) {
     if (!isBrowserTool(name)) return failed(`unknown tool: ${name}`);
     if (raw !== undefined && (raw === null || typeof raw !== 'object' || Array.isArray(raw))) return failed('invalid arguments: not a JSON object');
     const e = entry(id);
+    const allowPrivate = !!opts.allowPrivate;
+    const rawArgs = (raw ?? {}) as Record<string, unknown>;
     let plan;
     try {
-      plan = planBrowserCall(name, (raw ?? {}) as Record<string, unknown>, {
+      if (actsOnPage(name, rawArgs)) await e.process.readPage(signal);
+      plan = planBrowserCall(name, rawArgs, {
         pageUrl: e.process.pageUrl,
+        pageHost: e.process.pageHost,
         workDir: target.workDir,
         dataDir: opts.dataDir,
-        allowPrivate: !!opts.allowPrivate,
+        allowPrivate,
         lang,
         prefs: opts.settings.get(),
       });
+      await e.process.checkTarget(plan, allowPrivate);
     } catch (err) {
       return failed(err instanceof Error ? err.message : String(err));
     }
@@ -166,9 +172,21 @@ export function createBrowserMcpHandler(opts: BrowserMcpOptions) {
     // The browser may have been closed while the user decided (the member left, the setting was turned off).
     if (browsers.get(`${id.agentId}:${id.roomId}`) !== e) return failed(refusedText('off', lang));
     try {
+      // The page the user allowed acting on is still the one open (it may have moved while they decided).
+      if (asks && !bySession && actsOnPage(name, args)) {
+        await e.process.readPage(signal);
+        if (e.process.pageHost !== host) return failed('the page changed while the user decided; nothing was done');
+      }
       // The files as approved: checked again, then copied where Playwright may read them.
       if (kind.kind === 'upload') args.paths = e.process.stageUploads(prepareUploads(args.paths, target.workDir, opts.dataDir));
       const r = await e.process.call(name, args, signal);
+      const refusal = await e.process.checkPage(
+        name,
+        r,
+        { fullAccess: !target.asks, allowPrivate, approvedHost: kind.kind === 'observe' ? null : host, covers: (h) => e.sites.has(h) },
+        signal,
+      );
+      if (refusal) return failed(refusal);
       const content: object[] = [{ type: 'text', text: r.text || '(done)' }];
       for (const m of r.media) if (m.type === 'image') content.push({ type: 'image', data: m.data, mimeType: m.mime });
       return { content, isError: r.isError };

@@ -1,7 +1,7 @@
 {
   "name": "harness-team",
   "productName": "Harness Team",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "description": "Chat-first, harness-native, local-first multi-agent coding workspace",
   "license": "Apache-2.0",
@@ -94,6 +94,7 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
+      "include": "desktop/installer.nsh",
       "artifactName": "Harness-Team-Setup-${version}.${ext}"
     },
     "extraResources": [],

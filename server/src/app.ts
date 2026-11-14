@@ -6,7 +6,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { z } from 'zod';
-import type { BrowserSettingsResponse, KimiWebbridgeResponse, KimiWebbridgeState, PostMessageResponse, ServerEvent } from '../../shared/protocol.ts';
+import type { BrowserSettingsResponse, KimiWebbridgeResponse, KimiWebbridgeState, OlderMessages, PostMessageResponse, ServerEvent } from '../../shared/protocol.ts';
 import { AntigravityAdapter, type AntigravityAdapterOptions } from './adapters/antigravity/adapter.ts';
 import { DshAdapter, type DshAdapterOptions } from './adapters/dsh/adapter.ts';
 import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode/adapter.ts';
@@ -44,7 +44,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.15.0';
+export const SERVER_VERSION = '0.16.0';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -620,7 +620,9 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     if (a === 'rooms' && b && c === 'messages' && !d) {
       if (method === 'GET') {
         const after = intParam(url, 'afterSeq');
+        const before = intParam(url, 'beforeSeq');
         const limit = intParam(url, 'limit');
+        if (before !== undefined) return sendJson(res, 200, core.messagesBefore(b, before, limit) satisfies OlderMessages);
         const messages = after === undefined ? core.roomSnapshot(b, limit).messages : core.messagesAfter(b, after, limit);
         return sendJson(res, 200, { messages });
       }
@@ -814,6 +816,10 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     if (a === 'messages' && b && c === 'withdraw' && !d && method === 'POST') {
       // The local user takes back a queued message of theirs (cookie-authenticated user API only).
       return sendJson(res, 200, core.withdrawMessage(b));
+    }
+    if (a === 'messages' && b && c === 'steer' && !d && method === 'POST') {
+      // The local user adds a queued message of theirs to the running turn (cookie-authenticated user API only).
+      return sendJson(res, 200, core.steerQueuedMessage(b));
     }
     if (a === 'approvals' && b && !c && method === 'POST') {
       // The local user's decision on a native approval request (cookie-authenticated user API only).

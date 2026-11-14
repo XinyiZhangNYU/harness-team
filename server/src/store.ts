@@ -1035,9 +1035,19 @@ export class Store {
     return r ? toMessage(r) : undefined;
   }
 
-  /** Messages ordered by seq. `afterSeq` returns only newer ones (for resync); otherwise the latest `limit`. */
-  listMessages(roomId: string, opts: { afterSeq?: number; limit?: number } = {}): Message[] {
+  /**
+   * Messages ordered by seq. `afterSeq` returns only newer ones (for resync); `beforeSeq` the latest `limit` older ones
+   * (scrolling back); otherwise the latest `limit`.
+   */
+  listMessages(roomId: string, opts: { afterSeq?: number; beforeSeq?: number; limit?: number } = {}): Message[] {
     const limit = Math.min(Math.max(opts.limit ?? 200, 1), 1000);
+    if (opts.beforeSeq !== undefined) {
+      return (
+        this.db
+          .prepare('SELECT * FROM (SELECT * FROM messages WHERE room_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?) ORDER BY seq')
+          .all(roomId, opts.beforeSeq, limit) as Row[]
+      ).map(toMessage);
+    }
     if (opts.afterSeq !== undefined) {
       return (
         this.db
@@ -1224,14 +1234,15 @@ export class Store {
   }
 
   /** Deliveries of a room (optionally one state), for source messages with seq >= minSeq, in message order. */
-  listRoomDeliveries(roomId: string, opts: { state?: DeliveryState; minSeq?: number } = {}): DeliveryInfo[] {
+  /** Deliveries of the room's messages with seq in [minSeq, beforeSeq). */
+  listRoomDeliveries(roomId: string, opts: { state?: DeliveryState; minSeq?: number; beforeSeq?: number } = {}): DeliveryInfo[] {
     const rows = this.db
       .prepare(
         `SELECT d.* FROM deliveries d JOIN messages m ON m.id = d.message_id
-         WHERE d.room_id = ? AND (? IS NULL OR d.state = ?) AND m.seq >= ?
+         WHERE d.room_id = ? AND (? IS NULL OR d.state = ?) AND m.seq >= ? AND (? IS NULL OR m.seq < ?)
          ORDER BY m.seq, d.created_at, d.rowid`,
       )
-      .all(roomId, opts.state ?? null, opts.state ?? null, opts.minSeq ?? 0) as Row[];
+      .all(roomId, opts.state ?? null, opts.state ?? null, opts.minSeq ?? 0, opts.beforeSeq ?? null, opts.beforeSeq ?? null) as Row[];
     return rows.map(toDelivery);
   }
 

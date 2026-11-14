@@ -83,6 +83,8 @@ export function Composer(props: {
   quoteRef?: { current: ((text: string, from: string[]) => void) | null };
   /** Set by the composer: puts a withdrawn message's text (before any draft) and attachments back. */
   editRef?: { current: ((body: string, attachments: AttachmentInfo[]) => void) | null };
+  /** Members a queued message added to the running turn (from its delivery chips) still waits for. */
+  steerSkipsRef?: { current: ((skips: SteerSkip[]) => void) | null };
 }) {
   const t = useT();
   const lz = useLocalized();
@@ -142,6 +144,14 @@ export function Composer(props: {
       sink.current = null;
     };
   }, [props.quoteRef]);
+  useEffect(() => {
+    if (!props.steerSkipsRef) return;
+    const sink = props.steerSkipsRef;
+    sink.current = (skips) => setSteerSkips(skips);
+    return () => {
+      sink.current = null;
+    };
+  }, [props.steerSkipsRef]);
   const adoptAttachments = atts.adopt;
   useEffect(() => {
     if (!props.editRef) return;

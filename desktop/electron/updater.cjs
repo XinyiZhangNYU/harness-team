@@ -1,8 +1,8 @@
 'use strict';
 // In-app updates for the Windows desktop app. The latest release of the public repository is read from the GitHub
-// API; its installer (Harness-Team-Setup-<version>.exe) is downloaded only when the user asks, checked against the
-// SHA-256 digest GitHub lists for that file, and run silently (it updates the existing installation and starts the
-// app again) only when the user chooses to restart. Nothing is published, signed in to or sent anywhere.
+// API; its installer (Harness-Team-Setup-<version>.exe) is downloaded when the user asks or, with automatic updates on,
+// when a scheduled check finds it; it is checked against the SHA-256 digest GitHub lists for that file, and run
+// silently (it updates the existing installation and starts the app again) only when the user chooses to restart. Nothing is published, signed in to or sent anywhere.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -123,14 +123,24 @@ function createUpdater({ currentVersion, dir, fetch, log, onState }) {
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
         const h = crypto.createHash('sha256');
         const out = fs.createWriteStream(part);
+        // A write that fails (disk full, no access) ends the download, never the app: the stream closes itself.
+        let writeError = null;
+        out.on('error', (e) => {
+          writeError = e;
+        });
+        const settled = (event) => new Promise((r) => {
+          out.once(event, r);
+          out.once('close', r);
+        });
         let got = 0;
         let shown = 0;
         try {
           for await (const chunk of res.body) {
+            if (writeError) throw writeError;
             got += chunk.length;
             if (got > o.size) throw new Error('larger than listed');
             h.update(chunk);
-            if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+            if (!out.write(chunk)) await settled('drain');
             const pct = Math.floor((got / o.size) * 100);
             if (pct !== shown) {
               shown = pct;
@@ -138,8 +148,13 @@ function createUpdater({ currentVersion, dir, fetch, log, onState }) {
             }
           }
         } finally {
-          await new Promise((r) => out.end(r));
+          if (!out.closed) {
+            const closed = settled('close');
+            out.end();
+            await closed;
+          }
         }
+        if (writeError) throw writeError;
         if (got !== o.size) throw new Error('incomplete download');
         if (h.digest('hex') !== o.sha256) throw new Error('SHA-256 mismatch');
         fs.renameSync(part, target);
@@ -149,7 +164,11 @@ function createUpdater({ currentVersion, dir, fetch, log, onState }) {
         return true;
       } catch (e) {
         log(`[update] download failed: ${e && e.message}`);
-        fs.rmSync(part, { force: true });
+        try {
+          fs.rmSync(part, { force: true });
+        } catch {
+          // Left for the next download, which empties the folder first.
+        }
         set({ state: 'error', step: 'download', version: o.version, error: String((e && e.message) || e) });
         return false;
       } finally {

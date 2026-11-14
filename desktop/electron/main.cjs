@@ -12,7 +12,7 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, powerSaveBlocker, safeStorage, screen, shell, utilityProcess } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
-const { attachmentPath, canOpenDirectly, localFilePath } = require('./attachment-open.cjs');
+const { attachmentPath, canOpenDirectly, canOpenFolderDirectly, localFilePath } = require('./attachment-open.cjs');
 const { readState, restoreBounds, writeState } = require('./window-state.cjs');
 const { keepAwakeWanted, readPrefs, writePrefs } = require('./prefs.cjs');
 const { createUpdater, launchInstaller } = require('./updater.cjs');
@@ -25,6 +25,8 @@ const ATTENTION_POLL_MS = 3_000;
 const UPDATES = process.platform === 'win32' && app.isPackaged;
 const UPDATE_FIRST_CHECK_MS = 30_000;
 const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60_000;
+/** Settings → open at login: the installed app only (a development run would register the bare Electron binary). */
+const LOGIN_ITEM = app.isPackaged && (process.platform === 'win32' || process.platform === 'darwin');
 /** Windows: the page draws the window's title bar (☰ menu); preload.cjs gives the page the same height. */
 const CUSTOM_TITLE_BAR = process.platform === 'win32';
 const TITLE_BAR_HEIGHT = 36;
@@ -75,6 +77,7 @@ function main() {
   /** A downloaded, verified installer to run as the app exits (set by "Restart to update"). */
   let installOnQuit = null;
   let updateTimer = null;
+  let firstUpdateTimer = null;
 
   const dataDir = DATA_DIR;
   // With HT_DATA_DIR (a separate instance's data), its logs stay with that data instead of joining the default ones.
@@ -334,7 +337,7 @@ function main() {
       } catch {
         return { ok: false, error: 'missing' };
       }
-      if (action === 'open' && (folder || canOpenDirectly(p))) {
+      if (action === 'open' && (folder ? canOpenFolderDirectly(p) : canOpenDirectly(p))) {
         const err = await shell.openPath(p);
         if (!err) return { ok: true, revealed: false };
         log.write(`[shell] open cited file failed: ${err}`);
@@ -432,6 +435,34 @@ function main() {
       setKeepAwake(lastAttention ? keepAwakeWanted(prefs, lastAttention) : false);
       return prefs.keepAwake;
     });
+    // Settings → updates: scheduled checks that download a found update (on unless turned off).
+    ipcMain.removeHandler('ht:auto-update-get');
+    ipcMain.handle('ht:auto-update-get', (event) => (fromPage(event) && updater && prefs ? prefs.autoUpdate : null));
+    ipcMain.removeHandler('ht:auto-update-set');
+    ipcMain.handle('ht:auto-update-set', (event, on) => {
+      if (!fromPage(event) || !updater || !prefs || typeof on !== 'boolean') return null;
+      const next = { ...prefs, autoUpdate: on };
+      if (!writePrefs(prefsFile, next)) return prefs.autoUpdate;
+      prefs = next;
+      log.write(`[shell] automatic updates: ${on ? 'on' : 'off'}`);
+      scheduleUpdates(0);
+      return prefs.autoUpdate;
+    });
+    // Settings → open at login: kept by the system (Windows: the user's Run key; macOS: Login Items).
+    ipcMain.removeHandler('ht:open-at-login-get');
+    ipcMain.handle('ht:open-at-login-get', (event) => (fromPage(event) && LOGIN_ITEM ? app.getLoginItemSettings().openAtLogin === true : null));
+    ipcMain.removeHandler('ht:open-at-login-set');
+    ipcMain.handle('ht:open-at-login-set', (event, on) => {
+      if (!fromPage(event) || !LOGIN_ITEM || typeof on !== 'boolean') return null;
+      try {
+        app.setLoginItemSettings({ openAtLogin: on });
+      } catch (e) {
+        log.write(`[shell] open at login failed: ${e && e.message}`);
+      }
+      const now = app.getLoginItemSettings().openAtLogin === true;
+      log.write(`[shell] open at login: ${now ? 'on' : 'off'}`);
+      return now;
+    });
     ipcMain.removeHandler('ht:update-get');
     ipcMain.handle('ht:update-get', (event) => (fromPage(event) && updater ? updater.state() : null));
     ipcMain.removeAllListeners('ht:update-action');
@@ -443,10 +474,7 @@ function main() {
     });
     void win.loadURL(info.launchUrl);
     if (!attentionTimer) attentionTimer = setInterval(() => void pollAttention(), ATTENTION_POLL_MS);
-    if (updater && !updateTimer) {
-      setTimeout(() => void updater.check(), UPDATE_FIRST_CHECK_MS);
-      updateTimer = setInterval(() => void updater.check(), UPDATE_CHECK_EVERY_MS);
-    }
+    if (!updateTimer && !firstUpdateTimer) scheduleUpdates(UPDATE_FIRST_CHECK_MS);
   }
 
   function onSystemEnding() {
@@ -614,6 +642,30 @@ function main() {
     else if (a.response === 2) void shell.openExternal(r.update.page);
   }
 
+  /**
+   * Scheduled update checks while automatic updates are on: the first after `firstMs`, then every
+   * UPDATE_CHECK_EVERY_MS; turning them off stops both. Help › Check for Updates works either way.
+   */
+  function scheduleUpdates(firstMs) {
+    clearTimeout(firstUpdateTimer);
+    clearInterval(updateTimer);
+    firstUpdateTimer = null;
+    updateTimer = null;
+    if (!updater || !prefs || !prefs.autoUpdate || quitting) return;
+    firstUpdateTimer = setTimeout(() => {
+      firstUpdateTimer = null;
+      void autoUpdateCheck();
+    }, firstMs);
+    updateTimer = setInterval(() => void autoUpdateCheck(), UPDATE_CHECK_EVERY_MS);
+  }
+
+  /** A scheduled check; a found update is downloaded and verified, and waits for the user's "Restart to update". */
+  async function autoUpdateCheck() {
+    if (!updater || !prefs || !prefs.autoUpdate) return;
+    const r = await updater.check();
+    if (r.update && prefs.autoUpdate && !quitting && updater.state().state === 'available') void updater.download();
+  }
+
   /** "Restart to update": quits as the window's close does (asking when members work); the installer runs on exit. */
   async function restartToUpdate() {
     if (!updater || quitting) return;
@@ -726,7 +778,8 @@ function main() {
     if (attentionTimer) clearInterval(attentionTimer);
     setKeepAwake(false);
     if (win) win.hide();
-    if (updateTimer) clearInterval(updateTimer);
+    clearInterval(updateTimer);
+    clearTimeout(firstUpdateTimer);
     await stopCore();
     if (installOnQuit) {
       try {

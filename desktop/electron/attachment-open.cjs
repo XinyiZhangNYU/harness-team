@@ -15,7 +15,7 @@ const ID = /^[A-Za-z0-9-]{1,64}$/;
 const NO_DIRECT_OPEN = new Set(
   (
     'exe com scr pif bat cmd ps1 psm1 psd1 vbs vbe js jse mjs cjs wsf wsh wsc hta msi msp mst msix msixbundle appx ' +
-    'appxbundle appinstaller application appref-ms lnk url website reg inf scf cpl dll sys ocx drv jar py pyw rb pl sh ' +
+    'appxbundle appinstaller application appref-ms lnk url website reg inf scf cpl dll sys ocx drv jar py pyw pyz pyzw pyc pyo rb pl sh ' +
     'html htm xhtml mht mhtml svg shtml xml chm hlp msc gadget settingcontent-ms library-ms search-ms searchconnector-ms ' +
     'iso img vhd vhdx xll xla xlam ppam docm dotm xlsm xltm pptm potm sldm ' +
     // macOS: Terminal runs these, Finder follows location files, installers, profiles, bundles and scripts.
@@ -34,6 +34,16 @@ function canOpenDirectly(name) {
   const m = /\.([^.\\/]+)$/.exec(name.replace(/[. ]+$/, ''));
   // No extension: Windows would ask which program to use, harmless but useless; show it in the folder.
   return !!m && !NO_DIRECT_OPEN.has(m[1].normalize('NFKC').toLowerCase());
+}
+
+/**
+ * A folder opens in the file manager, except one whose name has an extension of the list: on macOS a `.app`,
+ * `.prefPane`, `.workflow` or `.bundle` is a folder that opening runs; it is shown in its folder instead.
+ * @param {string} name
+ */
+function canOpenFolderDirectly(name) {
+  const n = name.replace(/[\\/]+$/, '');
+  return !/\.([^.\\/]+)$/.test(n.replace(/[. ]+$/, '')) || canOpenDirectly(n);
 }
 
 /**
@@ -87,4 +97,4 @@ function localFilePath(raw, platform = process.platform) {
   return p;
 }
 
-module.exports = { attachmentPath, canOpenDirectly, localFilePath };
+module.exports = { attachmentPath, canOpenDirectly, canOpenFolderDirectly, localFilePath };

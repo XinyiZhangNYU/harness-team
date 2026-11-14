@@ -24,11 +24,19 @@ const WAITING = new Set<DeliveryInfo['state']>(['queued', 'held']);
  * queued can be taken back: all of it with its text back in the composer when nobody had it yet, else only the
  * queued copies.
  */
-export function DeliveryChips(props: { deliveries: DeliveryInfo[]; agents: Record<string, AgentWithStatus>; onWithdraw?: (edit: boolean) => void }) {
+export function DeliveryChips(props: {
+  deliveries: DeliveryInfo[];
+  agents: Record<string, AgentWithStatus>;
+  onWithdraw?: (edit: boolean) => void;
+  /** Adds the message to the running turn: offered while a member it waits for is working. */
+  onSteer?: () => void;
+}) {
   const { t, locale, lang } = usePrefs();
   const waiting = props.deliveries.some((d) => WAITING.has(d.state));
   const untouched = props.deliveries.every((d) => WAITING.has(d.state) || d.state === 'skipped');
   const withdraw = props.onWithdraw;
+  const steer = props.onSteer;
+  const steerable = props.deliveries.some((d) => d.state === 'queued' && props.agents[d.agentId]?.status === 'working');
   return (
     <div className="delivery-chips">
       {props.deliveries.map((d) => (
@@ -36,6 +44,12 @@ export function DeliveryChips(props: { deliveries: DeliveryInfo[]; agents: Recor
           @{props.agents[d.agentId]?.handle ?? '?'} · {t(`delivery.${d.state}`)}
         </span>
       ))}
+      {steer && steerable && (
+        <button type="button" className="chip chip-action" onClick={steer}>
+          <Icon name="enter" size={12} />
+          {t('msg.steer')}
+        </button>
+      )}
       {withdraw && waiting && (
         <>
           {untouched && (

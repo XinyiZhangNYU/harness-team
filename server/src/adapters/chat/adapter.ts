@@ -62,6 +62,7 @@ import {
   type BrowserToolName,
   isBrowserTool,
   planBrowserCall,
+  actsOnPage,
   prepareUploads,
 } from './browser.ts';
 import type { ChatProviders } from './providers.ts';
@@ -850,16 +851,20 @@ class Turn {
     const parsed = parseArgs(call.args);
     if (parsed === null) return fail('invalid arguments: not a JSON object');
     const browser = this.s.browser();
+    const allowPrivate = !!this.s.options.fetchAllowPrivate;
     let plan: BrowserPlan;
     try {
+      if (actsOnPage(name, parsed)) await browser.readPage(signal);
       plan = planBrowserCall(name, parsed, {
         pageUrl: browser.pageUrl,
+        pageHost: browser.pageHost,
         workDir,
         dataDir: this.s.options.dataDir,
-        allowPrivate: !!this.s.options.fetchAllowPrivate,
+        allowPrivate,
         lang,
         prefs: this.s.options.browserSettings.get(),
       });
+      await browser.checkTarget(plan, allowPrivate);
     } catch (e) {
       return fail(errorText(e));
     }
@@ -876,9 +881,21 @@ class Turn {
     const nativeStatus = bySession ? 'sessionApproved' : null;
     sink({ type: 'activity', itemId, activity: 'mcpToolCall', title, detail, nativeStatus, done: false });
     try {
+      // The page the user allowed acting on is still the one open (it may have moved while they decided).
+      if (asks && !bySession && actsOnPage(name, args)) {
+        await browser.readPage(signal);
+        if (browser.pageHost !== host) return fail('the page changed while the user decided; nothing was done');
+      }
       // The files as approved: checked again, then copied where Playwright may read them.
       if (kind.kind === 'upload') args.paths = browser.stageUploads(prepareUploads(args.paths, workDir, this.s.options.dataDir));
       const r = await browser.call(name, args, signal);
+      const refusal = await browser.checkPage(
+        name,
+        r,
+        { fullAccess: mode === 'full-access', allowPrivate, approvedHost: kind.kind === 'observe' ? null : host, covers: (h) => this.s.grants.coversBrowserSite(h) },
+        signal,
+      );
+      if (refusal) return fail(refusal);
       let content = r.text;
       let media = r.media;
       if (media.length && !this.c.model.image) {
