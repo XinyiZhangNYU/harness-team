@@ -54,6 +54,9 @@ function loadCommands(agentId: string, refresh = false) {
 }
 
 /** Quotes not yet sent, per room (kept while this window is open, also across room switches). */
+/** Steering is Cmd+Enter on macOS, Ctrl+Enter elsewhere (the keydown handler takes either). */
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+
 const roomQuotes = new Map<string, Quote[]>();
 let quoteSeq = 0;
 
@@ -97,6 +100,7 @@ export function Composer(props: {
   const ref = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = `${useId()}-list`;
+  const sendTipId = `${useId()}-send-tip`;
   const optionId = (i: number) => `${listId}-${i}`;
   // The text as last rendered, and whether this composer is still shown (a send can finish after a room switch).
   const textNow = useRef(text);
@@ -601,16 +605,38 @@ export function Composer(props: {
           }
         }}
       />
-      <button
-        type="button"
-        className="send primary icon-btn"
-        title={props.offline ? t('conn.sendLater') : hasAttachments && !atts.ready ? t('attach.notReady') : t('composer.send')}
-        aria-label={t('composer.send')}
-        onClick={() => void send()}
-        disabled={!canSend}
-      >
-        <Icon name="send" />
-      </button>
+      <span className="send-wrap">
+        <button
+          type="button"
+          className="send primary icon-btn"
+          title={props.offline ? t('conn.sendLater') : hasAttachments && !atts.ready ? t('attach.notReady') : undefined}
+          aria-label={t('composer.send')}
+          aria-describedby={sendTipId}
+          onClick={() => void send()}
+          disabled={!canSend}
+        >
+          <Icon name="send" />
+        </button>
+        <span id={sendTipId} role="tooltip" className="send-tip">
+          <span className="send-tip-row">
+            {t('composer.send')}
+            <span className="send-tip-keys">
+              <kbd>
+                <Icon name="enter" size={12} />
+              </kbd>
+            </span>
+          </span>
+          <span className="send-tip-row">
+            {t('composer.steer')}
+            <span className="send-tip-keys">
+              <kbd>{IS_MAC ? '⌘' : 'Ctrl'}</kbd>
+              <kbd>
+                <Icon name="enter" size={12} />
+              </kbd>
+            </span>
+          </span>
+        </span>
+      </span>
     </div>
   );
 }

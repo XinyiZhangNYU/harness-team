@@ -549,6 +549,8 @@ type Draft = {
   replayReasoning: boolean;
   reasoningLevels: string;
   reasoningMapping: string;
+  speeds: string;
+  speedMapping: string;
   extraBody: string;
   extraHeaders: string;
   priceInput: string;
@@ -572,6 +574,8 @@ function draftOf(m: ChatModelFields): Draft {
     replayReasoning: m.replayReasoning,
     reasoningLevels: m.reasoningLevels.join(', '),
     reasoningMapping: m.reasoningMapping,
+    speeds: m.speeds.join(', '),
+    speedMapping: m.speedMapping,
     extraBody: m.extraBody,
     extraHeaders: m.extraHeaders,
     priceInput: m.price ? String(m.price.input) : '',
@@ -617,6 +621,11 @@ function fieldsOf(d: Draft, t: TFunc): ChatModelFields {
       .map((x) => x.trim())
       .filter(Boolean),
     reasoningMapping: d.reasoningMapping.trim(),
+    speeds: d.speeds
+      .split(/[,，\s]+/)
+      .map((x) => x.trim())
+      .filter(Boolean),
+    speedMapping: d.speedMapping.trim(),
     extraBody: d.extraBody.trim(),
     extraHeaders: d.extraHeaders.trim(),
     price,
@@ -630,6 +639,8 @@ function ModelForm(props: { provider: ChatProvider; model: ChatModel; onBusy: (b
   const [d, setD] = useState<Draft>(() => draftOf(m));
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [asking, setAsking] = useState<'test' | 'remove' | null>(null);
+  /** The speed the test is sent at (null = default). */
+  const [testSpeed, setTestSpeed] = useState<string | null>(null);
   const [test, setTest] = useState<ChatModelTest | null>(null);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((x) => ({ ...x, [k]: v }));
   const manual = new Set(m.manual);
@@ -688,7 +699,7 @@ function ModelForm(props: { provider: ChatProvider; model: ChatModel; onBusy: (b
       <span>{t(`cp.f_${k}`)}</span>
     </label>
   );
-  const text = (k: 'displayName' | 'contextTokens' | 'maxOutputTokens' | 'compactAt' | 'reasoningLevels', label: string, mono = false) => (
+  const text = (k: 'displayName' | 'contextTokens' | 'maxOutputTokens' | 'compactAt' | 'reasoningLevels' | 'speeds', label: string, mono = false) => (
     <div className={`field${mark(k)}`}>
       <label className="field-label" htmlFor={`cm-${k}`}>
         {label}
@@ -696,7 +707,7 @@ function ModelForm(props: { provider: ChatProvider; model: ChatModel; onBusy: (b
       <input id={`cm-${k}`} className={mono ? 'mono' : undefined} value={d[k]} spellCheck={false} onChange={(e) => set(k, e.target.value)} />
     </div>
   );
-  const area = (k: 'reasoningMapping' | 'extraBody' | 'extraHeaders', label: string) => (
+  const area = (k: 'reasoningMapping' | 'speedMapping' | 'extraBody' | 'extraHeaders', label: string) => (
     <div className={`field${mark(k)}`}>
       <label className="field-label" htmlFor={`cm-${k}`}>
         {label}
@@ -742,6 +753,8 @@ function ModelForm(props: { provider: ChatProvider; model: ChatModel; onBusy: (b
           {text('compactAt', t('cp.compactAt'))}
         </div>
         {area('reasoningMapping', t('cp.reasoningMapping'))}
+        {text('speeds', t('cp.speeds'), true)}
+        {area('speedMapping', t('cp.speedMapping'))}
         {area('extraBody', t('cp.extraBody'))}
         {area('extraHeaders', t('cp.extraHeaders'))}
         <div className={`field${mark('price')}`}>
@@ -759,9 +772,27 @@ function ModelForm(props: { provider: ChatProvider; model: ChatModel; onBusy: (b
         <button type="button" disabled={!m.manual.length} onClick={() => void resetAll()}>
           {t('cp.resetRecommended')}
         </button>
-        <button type="button" onClick={() => setAsking('test')}>
+        <button
+          type="button"
+          onClick={() => {
+            setTestSpeed(null);
+            setAsking('test');
+          }}
+        >
           {t('cp.test')}
         </button>
+        {m.speeds.map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => {
+              setTestSpeed(s);
+              setAsking('test');
+            }}
+          >
+            {t('cp.testSpeed', { speed: speedTagName(t, s) })}
+          </button>
+        ))}
         <button type="button" className="danger-outline push-left" onClick={() => setAsking('remove')}>
           {t('cp.removeModel')}
         </button>
@@ -776,6 +807,7 @@ function ModelForm(props: { provider: ChatProvider; model: ChatModel; onBusy: (b
                   {t('cp.testUsage', { input: test.usage.input, cache: test.usage.cacheRead, output: test.usage.output })}
                 </div>
               )}
+              {test.tier && <div className="muted">{t('cp.testTier', { tier: test.tier })}</div>}
             </>
           ) : (
             lz(test.error) || t('cp.checkFailed')
@@ -784,13 +816,13 @@ function ModelForm(props: { provider: ChatProvider; model: ChatModel; onBusy: (b
       )}
       {asking === 'test' && (
         <ConfirmAction
-          title={t('cp.testTitle', { model: m.id })}
+          title={testSpeed ? t('cp.testSpeedTitle', { model: m.id, speed: speedTagName(t, testSpeed) }) : t('cp.testTitle', { model: m.id })}
           body={t('cp.testBody', { provider: props.provider.label })}
           confirmLabel={t('cp.testSend')}
           busyLabel={t('cp.testing')}
           onConfirm={async () => {
             setTest(null);
-            setTest(await api.testChatModel(props.provider.id, m.id));
+            setTest(await api.testChatModel(props.provider.id, m.id, testSpeed));
           }}
           onClose={() => setAsking(null)}
         />
@@ -822,6 +854,9 @@ export function ChatModelPicker(props: {
   providerId: string;
   model: string;
   effort: string;
+  /** The member's speed ('' = default: nothing sent). */
+  speed: string;
+  onSpeed: (speed: string) => void;
   fixedProvider?: boolean;
   onChange: (v: { providerId: string; model: string; effort: string }) => void;
 }) {
@@ -832,6 +867,11 @@ export function ChatModelPicker(props: {
   const models = provider?.models.filter((m) => m.enabled || m.id === props.model) ?? [];
   const selected = provider?.models.find((m) => m.id === props.model) ?? null;
   const levels = selected?.reasoningLevels ?? [];
+  const speeds = selected?.speeds ?? [];
+  // Another model may not have the chosen speed: back to the default.
+  useEffect(() => {
+    if (props.speed && selected && !selected.speeds.includes(props.speed)) props.onSpeed('');
+  }, [selected?.id, selected?.speeds.join()]);
 
   // Start with the first usable provider and its first model.
   useEffect(() => {
@@ -911,11 +951,30 @@ export function ChatModelPicker(props: {
               </select>
             </div>
           </div>
+          {(speeds.length > 0 || props.speed) && (
+            <div className="field">
+              <label className="field-label" htmlFor="chat-speed">
+                {t('speed.label')}
+              </label>
+              <select id="chat-speed" value={props.speed} onChange={(e) => props.onSpeed(e.target.value)}>
+                <option value="">{t('common.default')}</option>
+                {speeds.map((s) => (
+                  <option key={s} value={s}>
+                    {speedTagName(t, s)}
+                  </option>
+                ))}
+                {props.speed && !speeds.includes(props.speed) && <option value={props.speed}>{t('model.unsupported', { value: props.speed })}</option>}
+              </select>
+            </div>
+          )}
         </>
       )}
     </>
   );
 }
+
+/** A speed tag in the UI language: OpenAI fast (formerly priority), Gemini priority and Anthropic fast are all Fast. */
+export const speedTagName = (t: TFunc, id: string) => (id === 'priority' || id === 'fast' ? t('speed.fast') : id === 'ultrafast' ? t('speed.ultrafast') : id);
 
 /** Whether the chosen model offers native web search (the setting is greyed otherwise). */
 export function useChatModel(providerId: string, model: string): ChatModel | null {

@@ -113,6 +113,9 @@ function enumOptions(p: any): { value: string; label: string; description?: stri
   return list.map((o: any) => ({ value: o.const, label: str(o.title) ?? o.const, ...(str(o.description) ? { description: o.description } : {}) }));
 }
 
+/** RFC 3339 date-time (JSON Schema `date-time`): seconds and a time zone are part of it. */
+const DATE_TIME = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)$/i;
+
 export type CheckedAnswers = { ok: true; answers: ApprovalAnswers } | { ok: false; error: Localized };
 
 /**
@@ -137,6 +140,7 @@ export function checkAnswers(form: ApprovalForm, raw: unknown): CheckedAnswers {
         if (typeof v !== 'string') return bad('应为文本', 'expected text');
         if (v.length > MAX_TEXT || (f.maxLength != null && v.length > f.maxLength)) return bad('太长', 'too long');
         if (f.minLength != null && v.length < f.minLength) return bad('太短', 'too short');
+        if (f.format === 'date-time' && (!DATE_TIME.test(v) || Number.isNaN(Date.parse(v)))) return bad('应为带时区的日期时间', 'expected a date and time with a time zone');
         out[f.id] = v;
         break;
       }

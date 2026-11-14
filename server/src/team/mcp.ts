@@ -2,7 +2,7 @@ import { appendFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { localized } from '../../../shared/notices.ts';
-import type { AgentLanguage } from '../../../shared/protocol.ts';
+import { type AgentLanguage, SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES } from '../../../shared/protocol.ts';
 import type { Core, TeamIdentity } from '../core.ts';
 import { CoreError } from '../core.ts';
 import { redactForLog, redactText } from '../redact.ts';
@@ -12,8 +12,9 @@ import { redactForLog, redactText } from '../redact.ts';
  *
  * - Served on the Core's loopback port at `/team-mcp/<token>`. The token is issued by the Core per (agent, room) and
  *   is the only thing that identifies the caller: tools never accept a sender, role or authorization argument.
- * - It offers collaboration only (messages, status, tasks). There is deliberately no tool that approves, grants
- *   permissions or speaks as the user.
+ * - It offers collaboration only (messages, status, tasks, scheduled tasks). There is deliberately no tool that
+ *   approves, grants permissions or speaks as the user: a member's scheduled task posts as that member, and runs only
+ *   after the user switches it on.
  */
 
 export const TEAM_MCP_PATH = '/team-mcp/';
@@ -35,6 +36,13 @@ const INSTRUCTIONS: Record<AgentLanguage, string> = {
 
 const intent = z.enum(['chat', 'progress', 'blocked', 'help', 'review']);
 const taskStatus = z.enum(['todo', 'doing', 'done']);
+const repeat = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('once'), at: z.string().min(1).max(40) }).strict(),
+  z.object({ kind: z.literal('daily'), time: z.string().max(5) }).strict(),
+  z.object({ kind: z.literal('weekly'), time: z.string().max(5), days: z.array(z.number().int()).min(1).max(7) }).strict(),
+  z.object({ kind: z.literal('interval'), minutes: z.number().int() }).strict(),
+]);
+const scheduleId = z.string().min(1).max(64);
 
 const ARGS = {
   get_messages: z.object({
@@ -59,12 +67,26 @@ const ARGS = {
     assignee: z.string().max(40).nullable().optional(),
     title: z.string().min(1).max(200).optional(),
   }),
+  list_schedules: z.object({}),
+  create_schedule: z.object({
+    prompt: z.string().min(1).max(10_000),
+    repeat,
+    assignees: z.array(z.string().max(40)).max(100).nullable().optional(),
+  }),
+  update_schedule: z.object({
+    schedule_id: scheduleId,
+    prompt: z.string().min(1).max(10_000).optional(),
+    repeat: repeat.optional(),
+    assignees: z.array(z.string().max(40)).max(100).nullable().optional(),
+  }),
+  delete_schedule: z.object({ schedule_id: scheduleId }),
 } as const;
 
 type ToolName = keyof typeof ARGS;
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const DELETE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 
 export interface ToolInfo {
   name: ToolName;
@@ -172,6 +194,87 @@ export function teamTools(lang: AgentLanguage = 'zh'): ToolInfo[] {
       },
       annotations: { title: t('更新任务', 'Update a task'), ...WRITE },
     },
+    {
+      name: 'list_schedules',
+      description: t(
+        '列出本群的定时任务（谁建的、负责人、内容、规则、是否开启、是否等待用户开启、下次运行时间），以及这台电脑现在的本地时间。',
+        'List this chat’s scheduled tasks (who created it, assignees, prompt, rule, on or off, waiting for the user, next run), ' +
+          'and this computer’s local time now.',
+      ),
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { title: t('列出定时任务', 'List scheduled tasks'), ...READ_ONLY },
+    },
+    {
+      name: 'create_schedule',
+      description: t(
+        '新建定时任务：到时以你的名义在群里发出 “@负责人 内容”，每个负责人收到后开始一个回合。新任务先暂停，用户在定时任务里开启后才会运行。' +
+          '只在用户要求或确实需要定期跟进时使用。时间是这台电脑的本地时间（先用 list_schedules 查看）。',
+        'Create a scheduled task: when due, “@assignee prompt” is posted in the chat as you, and each assignee starts a turn. ' +
+          'A new task is paused and runs only after the user switches it on under Scheduled tasks. Use it only when the user ' +
+          'asks or regular follow-up is really needed. Times are this computer’s local time (see list_schedules).',
+      ),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', minLength: 1, maxLength: 10000, description: t('到时发给负责人的内容', 'What is sent to the assignees when due') },
+          repeat: {
+            type: 'object',
+            description: t(
+              '规则，kind 之一：once（at：本地日期时间，如 2026-11-14T09:00）、daily（time：HH:MM）、weekly（time：HH:MM，days：0=周日 … 6=周六）、' +
+                `interval（minutes：至少 ${SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES}）`,
+              'The rule, one kind of: once (at: local date and time, e.g. 2026-11-14T09:00), daily (time: HH:MM), weekly (time: ' +
+                `HH:MM, days: 0=Sunday … 6=Saturday), interval (minutes: at least ${SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES})`,
+            ),
+            properties: {
+              kind: { type: 'string', enum: ['once', 'daily', 'weekly', 'interval'] },
+              at: { type: 'string' },
+              time: { type: 'string' },
+              days: { type: 'array', items: { type: 'integer', minimum: 0, maximum: 6 } },
+              minutes: { type: 'integer', minimum: SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES },
+            },
+            required: ['kind'],
+            additionalProperties: false,
+          },
+          assignees: {
+            type: ['array', 'null'],
+            items: { type: 'string' },
+            description: t('负责人 handle 列表，可以多个；["all"] = 所有成员；省略 = 你自己', 'Assignee handles, any number; ["all"] = every member; omitted = yourself'),
+          },
+        },
+        required: ['prompt', 'repeat'],
+        additionalProperties: false,
+      },
+      annotations: { title: t('新建定时任务', 'Create a scheduled task'), ...WRITE },
+    },
+    {
+      name: 'update_schedule',
+      description: t(
+        '修改你自己建的定时任务的内容、规则或负责人。修改后任务暂停，等用户重新开启。',
+        'Change the prompt, rule or assignees of a scheduled task you created. The task is then paused until the user switches it on again.',
+      ),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          schedule_id: { type: 'string' },
+          prompt: { type: 'string', minLength: 1, maxLength: 10000 },
+          repeat: { type: 'object', description: t('与 create_schedule 相同', 'As in create_schedule') },
+          assignees: {
+            type: ['array', 'null'],
+            items: { type: 'string' },
+            description: t('负责人 handle 列表，可以多个；["all"] = 所有成员；null = 你自己', 'Assignee handles, any number; ["all"] = every member; null = yourself'),
+          },
+        },
+        required: ['schedule_id'],
+        additionalProperties: false,
+      },
+      annotations: { title: t('修改定时任务', 'Update a scheduled task'), ...WRITE },
+    },
+    {
+      name: 'delete_schedule',
+      description: t('删除你自己建的定时任务。', 'Delete a scheduled task you created.'),
+      inputSchema: { type: 'object', properties: { schedule_id: { type: 'string' } }, required: ['schedule_id'], additionalProperties: false },
+      annotations: { title: t('删除定时任务', 'Delete a scheduled task'), ...DELETE },
+    },
   ];
 }
 
@@ -200,6 +303,21 @@ function callTool(core: Core, id: TeamIdentity, name: ToolName, raw: unknown): u
     case 'update_task': {
       const a = ARGS.update_task.parse(raw ?? {});
       return core.teamUpdateTask(id, { taskId: a.task_id, status: a.status, assignee: a.assignee, title: a.title });
+    }
+    case 'list_schedules':
+      ARGS.list_schedules.parse(raw ?? {});
+      return core.teamListSchedules(id);
+    case 'create_schedule': {
+      const a = ARGS.create_schedule.parse(raw ?? {});
+      return core.teamCreateSchedule(id, { prompt: a.prompt, repeat: a.repeat, assignees: a.assignees });
+    }
+    case 'update_schedule': {
+      const a = ARGS.update_schedule.parse(raw ?? {});
+      return core.teamUpdateSchedule(id, { scheduleId: a.schedule_id, prompt: a.prompt, repeat: a.repeat, assignees: a.assignees });
+    }
+    case 'delete_schedule': {
+      const a = ARGS.delete_schedule.parse(raw ?? {});
+      return core.teamDeleteSchedule(id, { scheduleId: a.schedule_id });
     }
   }
 }

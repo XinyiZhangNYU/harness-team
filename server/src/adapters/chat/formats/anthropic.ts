@@ -122,6 +122,7 @@ export const anthropic: WireFormat = {
     let usage: Usage | null = null;
     let searches = 0;
     let ended = false;
+    let tier: string | null = null;
     const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
     const takeUsage = (u: Record<string, unknown> | undefined) => {
       if (!u) return;
@@ -133,6 +134,7 @@ export const anthropic: WireFormat = {
         output: n(u.output_tokens) ?? cur.output,
         reasoning: 0,
       };
+      if (typeof u.speed === 'string' && u.speed) tier = u.speed;
       const st = u.server_tool_use as { web_search_requests?: unknown } | undefined;
       if (n(st?.web_search_requests) !== null) searches = n(st!.web_search_requests)!;
     };
@@ -229,6 +231,7 @@ export const anthropic: WireFormat = {
       stopDetail: stop === 'other' && !ended ? 'the stream ended before the message completed' : stop === 'refusal' || stop === 'other' ? (stopDetail ?? stopReason) : null,
       usage,
       webSearches: searches,
+      tier,
     };
   },
 

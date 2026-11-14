@@ -15,6 +15,8 @@ import type {
   AgentLanguage,
   SenderKind,
   Task,
+  ScheduledTask,
+  ScheduleRepeat,
   TaskStatus,
   UsageGroup,
   UsageSummary,
@@ -24,7 +26,7 @@ import type { TurnUsage } from './adapters/types.ts';
 import { estimateCostUsd } from './pricing.ts';
 import { redactMessageCopy } from './message-copy.ts';
 import { isNotice, type Localized, type NoticeText, zhText } from '../../shared/notices.ts';
-import { DEFAULT_CHAT_MEMBER, handleKey, isAgentAvatar, type ChatMemberSettings, isAvatarDefaultKey, PERMISSION_MODES, type AvatarDefaultKey, type AvatarDefaults, type CollabMode, type PermissionMode, type RuntimeBilling, type RuntimeKind as Kind } from '../../shared/protocol.ts';
+import { DEFAULT_CHAT_MEMBER, SPEED_RUNTIMES, handleKey, isAgentAvatar, type ChatMemberSettings, isAvatarDefaultKey, PERMISSION_MODES, type AvatarDefaultKey, type AvatarDefaults, type CollabMode, type PermissionMode, type RuntimeBilling, type RuntimeKind as Kind } from '../../shared/protocol.ts';
 
 export type { DeliveryState } from '../../shared/protocol.ts';
 
@@ -117,6 +119,26 @@ function toTask(r: Row): Task {
   };
 }
 
+function toSchedule(r: Row): ScheduledTask {
+  return {
+    id: String(r.id),
+    roomId: String(r.room_id),
+    agentIds: r.agent_ids == null ? null : (JSON.parse(String(r.agent_ids)) as string[]),
+    prompt: String(r.prompt),
+    repeat: JSON.parse(String(r.repeat_json)) as ScheduleRepeat,
+    enabled: r.enabled === 1,
+    nextRunAt: str(r.next_run_at),
+    lastRunAt: str(r.last_run_at),
+    lastResult: (str(r.last_result) as ScheduledTask['lastResult']) ?? null,
+    ...(r.last_error ? { lastError: JSON.parse(String(r.last_error)) as NoticeText } : {}),
+    createdBy: str(r.created_by),
+    pending: r.pending === 1,
+    revision: Number(r.revision),
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
 function toAgent(r: Row): Agent {
   const c = parseConfig(r.config_json);
   return {
@@ -143,6 +165,7 @@ function toAgent(r: Row): Agent {
     language: c.language === 'zh' || c.language === 'en' ? c.language : null,
     // Members created before the setting have none: off.
     chrome: r.runtime_kind === 'claude' ? c.chrome === true : null,
+    speed: (SPEED_RUNTIMES.has(r.runtime_kind as RuntimeKind) || r.runtime_kind === 'chat') && typeof c.speed === 'string' && c.speed ? c.speed : null,
     chat: r.runtime_kind === 'chat' ? chatSettings(c.chat) : null,
   };
 }
@@ -174,6 +197,8 @@ interface AgentConfigJson {
   language?: string;
   /** Agent.chrome (Claude Code members); absent = off. */
   chrome?: boolean;
+  /** Agent.speed (Codex, Claude Code and API members); absent = the runtime's own configuration (API: the standard tier). */
+  speed?: string;
   /** Chat members only: ChatMemberSettings. */
   chat?: Partial<ChatMemberSettings>;
   [k: string]: unknown;
@@ -377,8 +402,8 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO usage_records (at, room_id, agent_id, runtime_kind, provider_id, model, project_dir, workspace, reply_message_id,
-           turn_status, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, cost_usd, tokens_known)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           turn_status, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, cost_usd, tokens_known, unpriced)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.at ?? now(),
@@ -398,6 +423,7 @@ export class Store {
         u.reasoning,
         u.costUsd,
         u.tokensUnknown ? 0 : 1,
+        u.unpriced ? 1 : 0,
       );
   }
 
@@ -426,9 +452,9 @@ export class Store {
           `SELECT u.k, u.runtime_kind, u.model, date(u.at, 'localtime') AS d, SUM(u.input_tokens) AS input, SUM(u.cache_read_tokens) AS cache_read,
              SUM(u.cache_write_tokens) AS cache_write, SUM(u.output_tokens) AS output,
              EXISTS (SELECT 1 FROM usage_records c WHERE ${covers}) AS covered,
-             EXISTS (SELECT 1 FROM ${keyed(keyExpr)} c WHERE ${covers} AND c.k IS u.k) AS covered_here
+             EXISTS (SELECT 1 FROM ${keyed(keyExpr)} c WHERE ${covers} AND c.k IS u.k) AS covered_here, u.unpriced
            FROM ${keyed(keyExpr)} u WHERE u.cost_usd IS NULL
-           GROUP BY 1, 2, 3, 4, 9, 10`,
+           GROUP BY 1, 2, 3, 4, 9, 10, 11`,
         )
         .all(...args, ...args) as Row[];
       for (const r of rows) {
@@ -438,6 +464,8 @@ export class Store {
         const used = tokens.input + tokens.cacheRead + tokens.cacheWrite + tokens.output > 0;
         if (Number(r.covered)) {
           if (!Number(r.covered_here) && used) e.partial = true;
+        } else if (Number(r.unpriced)) {
+          if (used) e.partial = true;
         } else {
           const c = estimateCostUsd(String(r.runtime_kind), r.model == null ? null : String(r.model), String(r.d), tokens);
           if (c !== null) {
@@ -538,6 +566,20 @@ export class Store {
     return Number(this.db.prepare('UPDATE room_members SET default_reply = ? WHERE room_id = ? AND agent_id = ?').run(on ? 1 : 0, roomId, agentId).changes) > 0;
   }
 
+  /** The members the user's latest message that went to anyone was delivered to (whether or not they answered). */
+  lastUserRecipients(roomId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT d.agent_id FROM deliveries d JOIN room_members rm ON rm.room_id = d.room_id AND rm.agent_id = d.agent_id
+           WHERE d.message_id = (SELECT m.id FROM messages m WHERE m.room_id = ? AND m.sender_kind = 'user'
+             AND EXISTS (SELECT 1 FROM deliveries x WHERE x.message_id = m.id) ORDER BY m.seq DESC LIMIT 1)
+           ORDER BY rm.joined_at, rm.rowid`,
+        )
+        .all(roomId) as Row[]
+    ).map((r) => String(r.agent_id));
+  }
+
   /** The agent member that last posted a chat message in the room (system notices and commands aside). */
   lastReplier(roomId: string): string | null {
     const r = this.db
@@ -561,6 +603,7 @@ export class Store {
     permissionMode?: PermissionMode | null;
     language?: AgentLanguage | null;
     chrome?: boolean;
+    speed?: string | null;
     /** Chat members: their provider. */
     providerId?: string | null;
     chat?: ChatMemberSettings | null;
@@ -584,6 +627,7 @@ export class Store {
       billingSeen: null,
       language: input.language ?? null,
       chrome: input.runtimeKind === 'claude' ? input.chrome === true : null,
+      speed: SPEED_RUNTIMES.has(input.runtimeKind) || input.runtimeKind === 'chat' ? (input.speed ?? null) : null,
       chat: input.runtimeKind === 'chat' ? (input.chat ?? { ...DEFAULT_CHAT_MEMBER }) : null,
     };
     const config: AgentConfigJson = {};
@@ -594,6 +638,7 @@ export class Store {
     if (agent.permissionMode) config.permissionMode = agent.permissionMode;
     if (agent.language) config.language = agent.language;
     if (agent.chrome) config.chrome = true;
+    if (agent.speed) config.speed = agent.speed;
     this.db
       .prepare(
         `INSERT INTO agents (id, handle, display_name, runtime_kind, is_mock, config_json, created_at, provider_id, collab_mode)
@@ -640,6 +685,7 @@ export class Store {
       avatar?: string | null;
       language?: AgentLanguage | null;
       chrome?: boolean;
+      speed?: string | null;
       chat?: ChatMemberSettings;
     },
   ): Agent {
@@ -670,6 +716,10 @@ export class Store {
     if (patch.chrome !== undefined) {
       if (patch.chrome) config.chrome = true;
       else delete config.chrome;
+    }
+    if (patch.speed !== undefined) {
+      if (patch.speed) config.speed = patch.speed;
+      else delete config.speed;
     }
     if (patch.displayName !== undefined) {
       this.db.prepare('UPDATE agents SET display_name = ?, config_json = ? WHERE id = ?').run(patch.displayName, JSON.stringify(config), id);
@@ -1166,6 +1216,99 @@ export class Store {
         id,
       );
     return this.getTask(id)!;
+  }
+
+  // ---- scheduled tasks ----
+
+  insertSchedule(input: {
+    roomId: string;
+    agentIds: string[] | null;
+    prompt: string;
+    repeat: ScheduleRepeat;
+    enabled: boolean;
+    nextRunAt: string | null;
+    createdBy?: string | null;
+    pending?: boolean;
+  }): ScheduledTask {
+    const id = randomUUID();
+    const ts = now();
+    this.db
+      .prepare(
+        `INSERT INTO schedules (id, room_id, agent_ids, prompt, repeat_json, enabled, next_run_at, last_run_at, last_result, last_error, created_by, pending,
+                                created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.roomId,
+        input.agentIds ? JSON.stringify(input.agentIds) : null,
+        input.prompt,
+        JSON.stringify(input.repeat),
+        input.enabled ? 1 : 0,
+        input.nextRunAt,
+        input.createdBy ?? null,
+        input.pending ? 1 : 0,
+        ts,
+        ts,
+      );
+    return this.getSchedule(id)!;
+  }
+
+  getSchedule(id: string): ScheduledTask | undefined {
+    const r = this.db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as Row | undefined;
+    return r ? toSchedule(r) : undefined;
+  }
+
+  listSchedules(roomId: string): ScheduledTask[] {
+    return (this.db.prepare('SELECT * FROM schedules WHERE room_id = ? ORDER BY created_at, id').all(roomId) as Row[]).map(toSchedule);
+  }
+
+  /** Enabled tasks whose next run is at or before `at` (ISO), soonest first. */
+  dueSchedules(at: string): ScheduledTask[] {
+    return (this.db.prepare('SELECT * FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at').all(at) as Row[]).map(toSchedule);
+  }
+
+  /** The soonest next run of any enabled task (ISO), or null. */
+  nextScheduleAt(): string | null {
+    const r = this.db.prepare('SELECT MIN(next_run_at) AS t FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL').get() as Row | undefined;
+    return r ? str(r.t) : null;
+  }
+
+  updateSchedule(
+    id: string,
+    patch: Partial<Pick<ScheduledTask, 'agentIds' | 'prompt' | 'repeat' | 'enabled' | 'nextRunAt' | 'lastRunAt' | 'lastResult' | 'pending'>> & { lastError?: NoticeText | null },
+  ): ScheduledTask {
+    const cur = this.getSchedule(id);
+    if (!cur) throw new Error(`schedule ${id} not found`);
+    const ids = patch.agentIds === undefined ? cur.agentIds : patch.agentIds;
+    const agentIds = ids ? JSON.stringify(ids) : null;
+    const prompt = patch.prompt ?? cur.prompt;
+    const repeat = JSON.stringify(patch.repeat ?? cur.repeat);
+    const changed = agentIds !== (cur.agentIds ? JSON.stringify(cur.agentIds) : null) || prompt !== cur.prompt || repeat !== JSON.stringify(cur.repeat);
+    this.db
+      .prepare(
+        `UPDATE schedules SET agent_ids = ?, prompt = ?, repeat_json = ?, enabled = ?, next_run_at = ?, last_run_at = ?, last_result = ?,
+           last_error = ?, pending = ?, revision = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        agentIds,
+        prompt,
+        repeat,
+        (patch.enabled ?? cur.enabled) ? 1 : 0,
+        patch.nextRunAt === undefined ? cur.nextRunAt : patch.nextRunAt,
+        patch.lastRunAt === undefined ? cur.lastRunAt : patch.lastRunAt,
+        patch.lastResult === undefined ? cur.lastResult : patch.lastResult,
+        patch.lastError === undefined ? (cur.lastError ? JSON.stringify(cur.lastError) : null) : patch.lastError ? JSON.stringify(patch.lastError) : null,
+        (patch.pending ?? cur.pending) ? 1 : 0,
+        cur.revision + (changed ? 1 : 0),
+        now(),
+        id,
+      );
+    return this.getSchedule(id)!;
+  }
+
+  deleteSchedule(id: string): boolean {
+    return Number(this.db.prepare('DELETE FROM schedules WHERE id = ?').run(id).changes) > 0;
   }
 
   // ---- cursors (per agent and room) ----

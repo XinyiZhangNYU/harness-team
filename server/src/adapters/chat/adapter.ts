@@ -10,8 +10,9 @@ import {
   DEFAULT_CHAT_MEMBER,
   type PermissionMode,
   type RuntimeDescriptor,
+  STANDARD_SPEED,
 } from '../../../../shared/protocol.ts';
-import { estimateCostUsd, localDate } from '../../pricing.ts';
+import { estimateCostUsd, localDate, speedFactor, STANDARD_TIERS } from '../../pricing.ts';
 import type { TeamIdentity } from '../../core.ts';
 import type { ToolInfo } from '../../team/mcp.ts';
 import {
@@ -213,13 +214,24 @@ class ChatSession implements AgentSession {
         }),
       };
     }
+    const chosen = input.config ? (input.config.speed ?? null) : agent.speed;
+    const speed = chosen === STANDARD_SPEED ? null : chosen;
+    if (speed !== null && !model.speeds.includes(speed)) {
+      return {
+        status: 'failed',
+        error: L('速度「{s}」不在模型「{m}」的速度档里，请在成员设置里重新选择', 'The speed “{s}” is not one of the model “{m}” speeds; choose it again in the member settings', {
+          s: speed,
+          m: model.id,
+        }),
+      };
+    }
     const key = await this.opts.providers.key(provider.id);
     if (!key) {
       return { status: 'failed', error: L('供应商「{p}」没有可用的 Key（未设置，或环境变量为空）', 'The provider “{p}” has no key available (not set, or the environment variable is empty)', { p: provider.label }) };
     }
     const mode = input.config ? input.config.permissionMode : agent.permissionMode;
     this.grants.use(`${chatWriteMode(mode) ?? 'read-only'}|${provider.id}|${model.id}`);
-    const turn = new Turn(this, { input, sink, signal, agent, settings, provider, model, level, key, mode: chatWriteMode(mode) });
+    const turn = new Turn(this, { input, sink, signal, agent, settings, provider, model, level, speed, key, mode: chatWriteMode(mode) });
     sink({ type: 'turn.started', nativeTurnId: `turn-${randomUUID()}` });
     sink({ type: 'config.effective', effective: { model: model.id, effort: level, source: L('API 请求', 'API request') } });
     sink({ type: 'permission.effective', permission: chatPermission(mode) });
@@ -259,6 +271,8 @@ interface TurnContext {
   provider: ChatProvider;
   model: ChatModel;
   level: string | null;
+  /** One of the model's speeds; null = standard (nothing sent). */
+  speed: string | null;
   key: string;
   /** null = read-only. */
   mode: ChatWriteMode | null;
@@ -301,6 +315,8 @@ class Turn {
   private readonly s: ChatSession;
   private readonly c: TurnContext;
   private readonly tally = new UsageTally();
+  /** The downgrade notice is shown once per turn. */
+  private downgradeNoticed = false;
   /** First item seq of this turn (raw content before it is replayed only when the model keeps reasoning across turns). */
   private turnStart = 0;
   private readonly team: TeamIdentity;
@@ -529,7 +545,7 @@ class Turn {
   }
 
   private spec(tools: ToolDef[]): CallSpec {
-    const { provider, model, key, level, agent } = this.c;
+    const { provider, model, key, level, speed, agent } = this.c;
     const system = this.system(tools);
     const webSearch = this.webSearch();
     const state = this.s.store.state(this.s.id);
@@ -540,6 +556,7 @@ class Turn {
       model,
       key,
       level,
+      speed,
       session: sessionHash(agent.id, this.s.open.roomId),
       system,
       items: this.items(),
@@ -584,11 +601,29 @@ class Turn {
           if (await this.compact('overflow', true)) continue;
         }
         if (e instanceof ChatNetworkError ? view.started : e instanceof ChatHttpError && !e.beforeOutput) this.tally.unknown(model.id);
+        if (spec.speed && e instanceof ChatHttpError && e.status === 429) {
+          this.notice(
+            L('可能是「{s}」速度档的限额用完了；可以稍后再试，或在成员设置里改回默认速度', 'The limit of the “{s}” speed may be used up; try again later, or set the member back to the default speed', {
+              s: spec.speed,
+            }),
+          );
+        }
         return this.result('failed', errorNotice(e, provider));
       }
       view.finish();
-      if (answer.usage) this.tally.add(model, answer.usage);
+      // Without a reported tier the requested one is assumed (an upper bound for the price).
+      const tier = answer.tier ?? spec.speed;
+      if (answer.usage) this.tally.add(model, answer.usage, tier);
       else this.tally.unknown(model.id);
+      if (spec.speed && answer.tier && !sameTier(spec.speed, answer.tier) && !this.downgradeNoticed) {
+        this.downgradeNoticed = true;
+        this.notice(
+          L('这次请求要的是「{want}」速度，API 回复说按「{got}」处理（按实际档位计费）', 'This request asked for the “{want}” speed; the API says it was served at “{got}” (billed at that tier)', {
+            want: spec.speed,
+            got: answer.tier,
+          }),
+        );
+      }
       const seq = this.s.store.append(this.s.id, {
         role: 'assistant',
         text: answer.text,
@@ -871,6 +906,8 @@ class Turn {
       model,
       key,
       level: model.reasoningLevels[0] ?? null,
+      // Summaries are not waited on by anyone: the standard speed.
+      speed: null,
       session: sessionHash(this.c.agent.id, this.s.open.roomId),
       system: zh
         ? '你负责为一段群聊成员的对话写摘要，供它之后继续对话。只输出摘要正文。'
@@ -896,7 +933,7 @@ class Turn {
     };
     try {
       const a = await callModel(WIRE_FORMATS[provider.format], spec, { text: () => {}, reasoning: () => {} }, { signal, idleMs: this.s.options.idleMs });
-      if (a.usage) this.tally.add(model, a.usage);
+      if (a.usage) this.tally.add(model, a.usage, a.tier ?? null);
       else this.tally.unknown(model.id);
       if (!a.text.trim() || (a.stop !== 'end' && a.stop !== 'max_tokens')) throw new Error(a.stopDetail ?? a.stop);
       const sumSeq = this.s.store.append(this.s.id, { role: 'summary', text: a.text.trim() });
@@ -982,15 +1019,16 @@ class UsageTally {
   private readonly known = new Map<string, TurnUsage>();
   private unknownModels = new Set<string>();
 
-  add(model: ChatModel, u: Usage) {
+  add(model: ChatModel, u: Usage, tier: string | null) {
     const cur = this.known.get(model.id) ?? { model: model.id, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, costUsd: 0 };
     cur.input += u.input;
     cur.cacheRead += u.cacheRead;
     cur.cacheWrite += u.cacheWrite;
     cur.output += u.output;
     cur.reasoning += u.reasoning;
-    const cost = costOf(model, u);
+    const cost = costOf(model, u, tier);
     cur.costUsd = cur.costUsd === null || cost === null ? null : cur.costUsd + cost;
+    if (speedFactor('chat', model.id, tier) === null) cur.unpriced = true;
     this.known.set(model.id, cur);
   }
 
@@ -1012,11 +1050,23 @@ class UsageTally {
   }
 }
 
-function costOf(model: ChatModel, u: Usage): number | null {
+/** Cost at the model's own price (or the list price), times the price factor of the tier that served it. */
+function costOf(model: ChatModel, u: Usage, tier: string | null): number | null {
+  const factor = speedFactor('chat', model.id, tier);
+  if (factor === null) return null;
   const p = model.price;
-  if (p) return (u.input * p.input + u.cacheRead * p.cacheRead + u.cacheWrite * p.cacheWrite + u.output * p.output) / 1_000_000;
+  if (p) return (factor * (u.input * p.input + u.cacheRead * p.cacheRead + u.cacheWrite * p.cacheWrite + u.output * p.output)) / 1_000_000;
   const now = new Date();
-  return estimateCostUsd('chat', model.id, localDate(now), u, now);
+  const cost = estimateCostUsd('chat', model.id, localDate(now), u, now);
+  return cost === null ? null : cost * factor;
+}
+
+/** Whether a reported tier is the one asked for (OpenAI answers "priority" for "fast" on older models). */
+export function sameTier(asked: string, reported: string): boolean {
+  if (asked === reported) return true;
+  const fast = new Set(['fast', 'priority']);
+  if (fast.has(asked) && fast.has(reported)) return true;
+  return STANDARD_TIERS.has(asked) && STANDARD_TIERS.has(reported);
 }
 
 /** FNV-1a over a string, twice with different seeds: short, stable, not reversible. */

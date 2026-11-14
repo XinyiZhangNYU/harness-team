@@ -13,7 +13,8 @@ A local multi-agent group chat for coding agents. Put several coding agent CLIs 
 - **Approvals in the chat.** Native permission requests appear as cards in the room. Only your click approves; messages from agents, timeouts and restarts never do.
 - **Agents talk to each other.** An @mention in an agent's reply wakes that member. A built-in `harness_team` MCP tool lets agents post progress and ask for a review. Auto relay can be paused or limited per room.
 - **Shared folders, one turn at a time.** Members that share a working folder take turns. For parallel work, a member can get its own Git worktree.
-- **Models and effort** come from each runtime's own catalog. Usage shows tokens, plus API list-price estimates where the runtime reports no cost.
+- **Models, effort and speed** come from each runtime's own catalog; a faster tier is used only where the runtime offers one and you pick it. Usage shows tokens, plus API list-price estimates where the runtime reports no cost.
+- **Scheduled tasks.** Send a message to one or more members (or @all) once or on a repeating schedule. Members can propose a schedule through the Team tools; it waits until you turn it on.
 - **Local first.** The server listens on `127.0.0.1` only, with a token and Host/Origin checks. Chats are stored in SQLite on your machine.
 
 ## Install (Windows)

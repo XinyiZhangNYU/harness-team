@@ -112,6 +112,7 @@ export async function parseChatStream(events: AsyncIterable<SseEvent>, hooks: St
   let reasoning = '';
   let finish: string | null = null;
   let usage: Usage | null = null;
+  let tier: string | null = null;
   const calls = new Map<number, ToolCall>();
   for await (const ev of events) {
     if (ev.data === '[DONE]') break;
@@ -123,6 +124,7 @@ export async function parseChatStream(events: AsyncIterable<SseEvent>, hooks: St
     }
     const u = j.usage as Record<string, unknown> | null | undefined;
     if (u) usage = chatUsage(u);
+    if (typeof j.service_tier === 'string' && j.service_tier) tier = j.service_tier;
     const choice = (j.choices as Record<string, unknown>[] | undefined)?.[0];
     if (!choice) continue;
     const d = (choice.delta ?? {}) as Record<string, unknown>;
@@ -161,6 +163,7 @@ export async function parseChatStream(events: AsyncIterable<SseEvent>, hooks: St
     stopDetail: stop === 'other' || stop === 'refusal' ? finish : null,
     usage,
     webSearches: 0,
+    tier,
   };
 }
 

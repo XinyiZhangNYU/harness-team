@@ -9,6 +9,7 @@ import type {
   RuntimeDescriptor,
   RuntimeKind,
   RuntimeModelCatalog,
+  RuntimeSpeedOption,
   Room,
 } from '../../../shared/protocol.ts';
 import {
@@ -25,6 +26,8 @@ import {
   RISKY_PERMISSION_MODES,
   RESERVED_HANDLES,
   codexImplicitEffort,
+  SPEED_RUNTIMES,
+  STANDARD_SPEED,
   handleKey,
   handleLength,
 } from '../../../shared/protocol.ts';
@@ -39,7 +42,7 @@ import { HelpTip } from './HelpTip.tsx';
 import { Icon } from './Icon.tsx';
 import { groupModels } from '../model-groups.ts';
 import { AgentAvatar, AvatarDefaultsContext, MeteredBadge, RUNTIME_NAME, RuntimeBadge } from './RuntimeBadge.tsx';
-import { ChatModelPicker, ChatSettingsFields, cachedChatModel, chatDefaults, forModel, newChatDefaults, usableProviders, useChatModel, useChatProviders } from './ChatProviders.tsx';
+import { ChatModelPicker, ChatSettingsFields, cachedChatModel, speedTagName, chatDefaults, forModel, newChatDefaults, usableProviders, useChatModel, useChatProviders } from './ChatProviders.tsx';
 import { WorkspacePicker } from './WorkspacePicker.tsx';
 
 // ---- model catalog (always discovered from the runtime through the Core; never a list in the UI) ----
@@ -130,7 +133,9 @@ export function configSummary(a: AgentWithStatus, t: TFunc): string {
     a.runtimeKind === 'chat' ? cachedChatModel(a.providerId, id)?.displayName || id : (knownModel(a.runtimeKind, id)?.displayName ?? id);
   const model = a.model ? name(a.model) : eff?.model ? t('common.defaultOf', { value: name(eff.model) }) : t('common.default');
   const effort = a.effort ? effortName(t, a.effort) : eff?.effort ? t('common.defaultOf', { value: effortName(t, eff.effort) }) : null;
-  return effort ? `${model} · ${effort}` : model;
+  // A chosen speed other than standard is worth seeing on the card (it changes usage); standard / follow is not shown.
+  const speed = a.speed && a.speed !== STANDARD_SPEED ? speedName(t, { id: a.speed, name: titleCase(a.speed), available: true }) : null;
+  return [model, effort, speed].filter(Boolean).join(' · ');
 }
 
 /** Model + effort selects fed only by the runtime's own catalog. "" = follow the runtime's default. */
@@ -232,6 +237,45 @@ function ModelEffortFields(props: {
   );
 }
 
+/** Speed names in the UI language: Codex's "priority" tier and Claude Code's fast mode are both Fast. */
+const speedName = (t: TFunc, s: RuntimeSpeedOption) => (['priority', 'fast', 'ultrafast'].includes(s.id) ? speedTagName(t, s.id) : s.name);
+
+/**
+ * Speed select ("" = follow the runtime's own setting), only for runtimes with a speed choice and only with the speeds
+ * the runtime reports for this account and the model that will run; one it reports as unavailable is greyed with its reason.
+ */
+function SpeedField(props: { runtimeKind: RuntimeKind; cwd?: string | null; generation?: number; model: string; value: string; onChange: (v: string) => void }) {
+  const t = useT();
+  const lz = useLocalized();
+  const { catalog } = useCatalog(props.runtimeKind, props.cwd, props.generation);
+  if (!SPEED_RUNTIMES.has(props.runtimeKind) || !catalog?.available) return null;
+  const speeds = (props.model ? catalog.models.find((m) => m.id === props.model)?.speeds : catalog.nativeDefault?.speeds) ?? [];
+  if (!speeds.length && !props.value) return null;
+  const unknown = props.value && props.value !== STANDARD_SPEED && !speeds.some((s) => s.id === props.value);
+  const credits = props.runtimeKind === 'claude' ? ` · ${t('speed.credits')}` : '';
+  const tip = speeds
+    .map((s) => [`${speedName(t, s)}: ${lz(s.description) || s.name}`, s.available ? '' : lz(s.reason)].filter(Boolean).join('\n'))
+    .join('\n\n');
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor={`speed-${props.runtimeKind}`}>
+        {t('speed.label')} {tip && <HelpTip text={tip} />}
+      </label>
+      <select id={`speed-${props.runtimeKind}`} value={props.value} onChange={(e) => props.onChange(e.target.value)}>
+        <option value="">{t('common.default')}</option>
+        <option value={STANDARD_SPEED}>{t('speed.standard')}</option>
+        {speeds.map((s) => (
+          <option key={s.id} value={s.id} disabled={!s.available && props.value !== s.id} title={s.available ? undefined : lz(s.reason) || undefined}>
+            {speedName(t, s)}
+            {credits}
+          </option>
+        ))}
+        {unknown && <option value={props.value}>{t('model.unsupported', { value: props.value })}</option>}
+      </select>
+    </div>
+  );
+}
+
 const isRiskyMode = (m: string | null | undefined) => !!m && RISKY_PERMISSION_MODES.includes(m as PermissionMode);
 
 /** What a request must carry to set `mode`: the warning version for a mode in which nothing asks for approval. */
@@ -267,7 +311,7 @@ function PermissionField(props: {
   // A saved mode this build does not offer (cannot normally happen) stays visible instead of silently changing.
   const unknown = value && !modes.includes(value as PermissionMode);
   const help = value
-    ? ((chat || props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' || props.runtimeKind === 'kimi' || props.runtimeKind === 'copilot' ? `permHelp.${props.runtimeKind}.${value}` : `permHelp.${value}`) as Parameters<TFunc>[0])
+    ? ((chat || props.runtimeKind === 'antigravity' || props.runtimeKind === 'opencode' || props.runtimeKind === 'cursor' || props.runtimeKind === 'kimi' || props.runtimeKind === 'copilot' ? `permHelp.${props.runtimeKind}.${value}` : `permHelp.${value}`) as Parameters<TFunc>[0])
     : 'permHelp.follow';
   const general = chat ? t('perm.chatHelp') : t('perm.help', { runtime });
   return (
@@ -1258,6 +1302,7 @@ function NewAgentForm(props: {
   /** The user chose the harness or its login in this form: detection results no longer change it while it works. */
   const userPicked = useRef(false);
   const [cfg, setCfg] = useState({ model: '', effort: '' });
+  const [speed, setSpeed] = useState('');
   /** Chat members: the member's own settings. */
   const [chatSettings, setChatSettings] = useState(newChatDefaults);
   const chatModel = useChatModel(chatCfg.providerId, chatCfg.model);
@@ -1334,6 +1379,7 @@ function NewAgentForm(props: {
 
   function resetConfig() {
     setCfg({ model: '', effort: '' });
+    setSpeed('');
   }
 
   const redetectButton = (
@@ -1438,11 +1484,13 @@ function NewAgentForm(props: {
                   providerId: chatCfg.providerId,
                   model: chatCfg.model,
                   ...(chatCfg.effort ? { effort: chatCfg.effort } : {}),
+                  ...(speed ? { speed } : {}),
                   chat: forModel(chatSettings, chatModel),
                 }
               : {
                   ...(cfg.model ? { model: cfg.model } : {}),
                   ...(cfg.effort ? { effort: cfg.effort } : {}),
+                  ...(speed && SPEED_RUNTIMES.has(runtimeKind) ? { speed } : {}),
                 }),
             ...(perm && (PERMISSION_MODES[runtimeKind] ?? []).includes(perm as PermissionMode) ? { permissionMode: perm as PermissionMode, ...permissionRiskAck(perm) } : {}),
             ...(runtimeKind === 'antigravity' && collab === 'full' ? { collabMode: 'full' as const, acknowledgeCollabRisk: COLLAB_WARNING_VERSION } : {}),
@@ -1497,9 +1545,14 @@ function NewAgentForm(props: {
         </div>
       </div>
       {isChat ? (
-        <ChatModelPicker providerId={chatCfg.providerId} model={chatCfg.model} effort={chatCfg.effort} onChange={setChatCfg} />
+        <ChatModelPicker providerId={chatCfg.providerId} model={chatCfg.model} effort={chatCfg.effort} speed={speed} onSpeed={setSpeed} onChange={setChatCfg} />
       ) : (
-        !runtime?.isMock && <ModelEffortFields runtimeKind={runtimeKind} generation={detected} model={cfg.model} effort={cfg.effort} onChange={setCfg} onMetered={setModelMetered} />
+        !runtime?.isMock && (
+          <>
+            <ModelEffortFields runtimeKind={runtimeKind} generation={detected} model={cfg.model} effort={cfg.effort} onChange={setCfg} onMetered={setModelMetered} />
+            <SpeedField runtimeKind={runtimeKind} generation={detected} model={cfg.model} value={speed} onChange={setSpeed} />
+          </>
+        )
       )}
       {runtimeKind === 'claude' && <ChromeCheck checked={chrome} onChange={setChrome} />}
       {needsWorkspace && <WorkspacePicker value={workspace} onChange={setWorkspace} />}
@@ -1693,6 +1746,7 @@ function AgentDialog(props: {
   const chatModel = useChatModel(a.providerId ?? '', cfg.model);
   const chatProvider = useChatProviders().data?.providers.find((p) => p.id === a.providerId) ?? null;
   const [perm, setPerm] = useState<string>(a.permissionMode ?? '');
+  const [speed, setSpeed] = useState<string>(a.speed ?? '');
   const [avatar, setAvatar] = useState<string | null>(a.avatar);
   const [language, setLanguage] = useState<string>(a.language ?? '');
   const [chrome, setChrome] = useState(a.chrome === true);
@@ -1709,7 +1763,8 @@ function AgentDialog(props: {
   const permChanged = perm !== (a.permissionMode ?? '');
   const chatChanged = isChat && JSON.stringify(chatSettings) !== JSON.stringify(a.chat ?? chatDefaults());
   const chromeChanged = a.runtimeKind === 'claude' && chrome !== (a.chrome === true);
-  const configChanged = modelChanged || permChanged || chatChanged || chromeChanged;
+  const speedChanged = (SPEED_RUNTIMES.has(a.runtimeKind) || isChat) && speed !== (a.speed ?? '');
+  const configChanged = modelChanged || permChanged || chatChanged || chromeChanged || speedChanged;
   const avatarChanged = avatar !== a.avatar;
   const languageChanged = language !== (a.language ?? '');
   const defaultChanged = !!props.roomId && defaultReply !== props.defaultReply;
@@ -1732,6 +1787,7 @@ function AgentDialog(props: {
             ...(permChanged ? { permissionMode: (perm || null) as PermissionMode | null, ...permissionRiskAck(perm) } : {}),
             ...(chatChanged ? { chat: chatSettings } : {}),
             ...(chromeChanged ? { chrome } : {}),
+            ...(speedChanged ? { speed: speed || null } : {}),
             ...(avatarChanged ? { avatar } : {}),
             ...(languageChanged ? { language: asLanguage(language) } : {}),
           })
@@ -1795,6 +1851,8 @@ function AgentDialog(props: {
               providerId={a.providerId ?? ''}
               model={cfg.model}
               effort={cfg.effort}
+              speed={speed}
+              onSpeed={setSpeed}
               fixedProvider
               onChange={(v) => setCfg({ model: v.model, effort: v.effort })}
             />
@@ -1804,6 +1862,7 @@ function AgentDialog(props: {
         ) : !a.isMock && (
           <>
             <ModelEffortFields runtimeKind={a.runtimeKind} cwd={a.workspace} model={cfg.model} effort={cfg.effort} onChange={setCfg} />
+            <SpeedField runtimeKind={a.runtimeKind} cwd={a.workspace} model={cfg.model} value={speed} onChange={setSpeed} />
             <PermissionField runtimeKind={a.runtimeKind} cwd={a.workspace} handle={a.handle} value={perm} onChange={setPerm} />
             {a.runtimeKind === 'claude' && <ChromeCheck checked={chrome} onChange={setChrome} />}
             <CollabModeField agent={a} onResult={setResult} />

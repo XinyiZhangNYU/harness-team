@@ -29,10 +29,14 @@ import type {
   RuntimeCommand,
   RuntimeKind,
   RuntimeModelCatalog,
+  RuntimeSpeedOption,
   SessionChoice,
   SessionChoiceOption,
   Task,
   TaskStatus,
+  ScheduledTask,
+  CreateScheduleRequest,
+  UpdateScheduleRequest,
   UpdateAgentResponse,
   UsageSummary,
   FileChange,
@@ -42,7 +46,7 @@ import type {
   SteerSkip,
 } from '../../shared/protocol.ts';
 import { errorNotice, L, type Localized, N, type NoticeText, permissionLabel, zhOf, zhText } from '../../shared/notices.ts';
-import { ALL_HANDLE, ATTACHMENT_LIMITS, type ChatMemberSettings, DEFAULT_CHAT_MEMBER, COLLAB_WARNING_VERSION, PERMISSION_WARNING_VERSION, RISKY_PERMISSION_MODES, HANDLE_MAX, HANDLE_PATTERN, isAgentAvatar, isAvatarDefaultKey, PERMISSION_MODES, type AvatarDefaults, RESERVED_HANDLES, handleKey, handleLength, parseMentions, parseSlashCommand, unquotePath } from '../../shared/protocol.ts';
+import { ALL_HANDLE, ATTACHMENT_LIMITS, SCHEDULE_MEMBER_MAX_PER_ROOM, SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES, type ScheduleRepeat, SPEED_RUNTIMES, STANDARD_SPEED, type ChatMemberSettings, DEFAULT_CHAT_MEMBER, COLLAB_WARNING_VERSION, PERMISSION_WARNING_VERSION, RISKY_PERMISSION_MODES, HANDLE_MAX, HANDLE_PATTERN, isAgentAvatar, isAvatarDefaultKey, PERMISSION_MODES, type AvatarDefaults, RESERVED_HANDLES, handleKey, handleLength, parseMentions, parseSlashCommand, unquotePath } from '../../shared/protocol.ts';
 import type { AdapterRegistry } from './adapters/registry.ts';
 import { answersSummary, checkAnswers } from './adapters/forms.ts';
 import type { ChatProviders } from './adapters/chat/providers.ts';
@@ -68,6 +72,12 @@ import { projectDirOf } from './workspaces.ts';
 import { redactStrings, redactText, StreamRedactor } from './redact.ts';
 import { redactLocalized } from './message-copy.ts';
 import { pathKey, pathsOverlap } from './path-key.ts';
+import { nextRunAfter, normalizeRepeat } from './schedule.ts';
+
+/** A scheduled run found more than this late (the app was closed, the computer slept) is recorded as missed, not sent. */
+export const SCHEDULE_GRACE_MS = 5 * 60_000;
+/** Longest prompt a scheduled task may carry (it is sent as `@handle prompt`). */
+const SCHEDULE_PROMPT_MAX = 10_000;
 
 /** An error for the HTTP caller. `notice` (when given) is the same text in both languages; `message` is Chinese. */
 export class CoreError extends Error {
@@ -221,6 +231,7 @@ export class Core {
   private readonly skillFailures = new Map<string, number>();
   private started = false;
   private sweepTimer: NodeJS.Timeout | null = null;
+  private scheduleTimer: NodeJS.Timeout | null = null;
 
   /** Directories no agent workspace may contain or sit inside (the data directory: token, database, backups). */
   private readonly protectedDirs: string[];
@@ -419,6 +430,7 @@ export class Core {
       this.sweepTimer.unref();
     }
     for (const [agentId, st] of this.agents) if (st.queue.length) this.kick(agentId);
+    this.runDueSchedules();
   }
 
   // ---- queries ----
@@ -513,6 +525,7 @@ export class Core {
       messages,
       deliveries: this.store.listRoomDeliveries(roomId, { minSeq: messages[0]?.seq ?? 0 }),
       tasks: this.store.listTasks(roomId),
+      schedules: this.store.listSchedules(roomId),
     };
   }
 
@@ -654,6 +667,7 @@ export class Core {
     worktree?: boolean;
     model?: string | null;
     effort?: string | null;
+    speed?: string | null;
     permissionMode?: PermissionMode | null;
     acknowledgePermissionRisk?: string;
     collabMode?: CollabMode;
@@ -706,8 +720,12 @@ export class Core {
     if (input.worktree && !workspace) throw new CoreError(400, L('创建 Worktree 需要一个 Git 仓库作为工作目录', 'Creating a worktree needs a Git repository as the working folder'));
     const model = normalizeOption(input.model);
     const effort = normalizeOption(input.effort);
-    if (isChat) this.validateChatConfig(input.providerId ?? null, model, effort);
-    else await this.validateModelConfig(input.runtimeKind, model, effort, workspace ?? null);
+    const speedIn = normalizeOption(input.speed);
+    // API members: standard is no faster tier, stored as null (nothing is sent).
+    const speed = isChat && speedIn === STANDARD_SPEED ? null : speedIn;
+    if (isChat) {
+      this.validateChatConfig(input.providerId ?? null, model, effort, speed);
+    } else await this.validateModelConfig(input.runtimeKind, model, effort, workspace ?? null, speed);
     await this.checkModeAvailable(input.runtimeKind, permissionMode, workspace ?? null);
 
     // ---- synchronous from here on: allocate the handle, create the worktree, insert ----
@@ -732,6 +750,7 @@ export class Core {
         workspace,
         model,
         effort,
+        speed,
         permissionMode,
         language: input.language ?? null,
         ...(input.runtimeKind === 'claude' ? { chrome: input.chrome === true } : {}),
@@ -798,8 +817,13 @@ export class Core {
    * Strict check of an explicit model/effort against the runtime's own catalog. null/null (follow the runtime's
    * default) is always accepted and needs no discovery. Errors are Chinese and say what is allowed instead.
    */
-  private async validateModelConfig(runtimeKind: RuntimeKind, model: string | null, effort: string | null, cwd: string | null) {
-    if (model === null && effort === null) return;
+  private async validateModelConfig(runtimeKind: RuntimeKind, model: string | null, effort: string | null, cwd: string | null, speed: string | null = null) {
+    const label0 = this.registry.get(runtimeKind)?.describe().label ?? runtimeKind;
+    if (speed !== null && !SPEED_RUNTIMES.has(runtimeKind)) throw speedUnsupported(label0);
+    if (speed !== null && !EFFORT_PATTERN.test(speed)) throw new CoreError(400, L('速度「{speed}」格式无效', 'The speed “{speed}” is not valid', { speed }));
+    // Standard speed is always accepted: it only keeps a faster tier from the runtime's own configuration off.
+    if (speed === STANDARD_SPEED) speed = null;
+    if (model === null && effort === null && speed === null) return;
     if (model !== null && !MODEL_ID_PATTERN.test(model)) throw new CoreError(400, L('模型标识「{model}」格式无效', 'The model id “{model}” is not valid', { model }));
     if (effort !== null && !EFFORT_PATTERN.test(effort)) throw new CoreError(400, L('Effort「{effort}」格式无效', 'The effort “{effort}” is not valid', { effort }));
     const cat = await this.modelCatalog(runtimeKind, { cwd });
@@ -808,16 +832,31 @@ export class Core {
       throw new CoreError(400, L('{error}。只能选择「跟随默认配置」，或稍后重试。', '{error}. Only “Default” can be chosen, or try again later.', { error: cat.error ?? L('无法获取 {runtime} 的模型列表', 'Could not get the model list of {runtime}', { runtime: label }) }));
     }
     let efforts: string[];
+    let speeds: RuntimeSpeedOption[];
     let modelName: NoticeText;
     if (model !== null) {
       const opt = cat.models.find((m) => m.id === model);
       if (!opt) throw new CoreError(400, L('模型「{model}」不在 {runtime} 当前报告的可用模型中，请刷新模型列表后重选', 'The model “{model}” is not among the models {runtime} reports right now; refresh the model list and choose again', { model, runtime: label }));
       efforts = opt.efforts;
+      speeds = opt.speeds ?? [];
       modelName = L('模型「{name}」', 'The model “{name}”', { name: opt.displayName });
     } else {
       if (!cat.nativeDefault) throw new CoreError(400, L('无法确定 {runtime} 默认模型支持哪些 Effort，请同时选择一个模型', 'Cannot tell which efforts the default model of {runtime} supports; choose a model as well', { runtime: label }));
       efforts = cat.nativeDefault.efforts;
+      speeds = cat.nativeDefault.speeds ?? [];
       modelName = cat.nativeDefault.model ? L('默认模型「{name}」', 'The default model “{name}”', { name: cat.nativeDefault.model }) : L('默认模型', 'The default model');
+    }
+    if (speed !== null) {
+      const s = speeds.find((o) => o.id === speed);
+      if (!s) {
+        throw new CoreError(
+          400,
+          speeds.length
+            ? L('{model}在这个账号上没有速度「{speed}」，可选：{options}', '{model} has no speed “{speed}” on this account; available: {options}', { model: modelName, speed, options: speeds.map((o) => o.name) })
+            : L('{model}在这个账号上没有更快的速度可选', '{model} offers no faster speed on this account', { model: modelName }),
+        );
+      }
+      if (!s.available) throw new CoreError(400, L('速度「{speed}」现在不可用：{reason}', 'The speed “{speed}” cannot be used now: {reason}', { speed: s.name, reason: s.reason ?? L('运行时没有说明原因', 'the runtime gave no reason') }));
     }
     if (effort !== null) {
       if (!efforts.length) throw new CoreError(400, L('{model}不支持选择 Effort，请使用「默认 Effort」', '{model} does not support choosing an effort; use “Default effort”', { model: modelName }));
@@ -825,8 +864,8 @@ export class Core {
     }
   }
 
-  /** A chat member needs an enabled provider and model; its reasoning level is one of that model's tags. */
-  private validateChatConfig(providerId: string | null, model: string | null, effort: string | null) {
+  /** A chat member needs an enabled provider and model; its reasoning level and speed are ones that model has. */
+  private validateChatConfig(providerId: string | null, model: string | null, effort: string | null, speed: string | null = null) {
     if (!this.chatModels) throw new CoreError(400, L('API 成员在这次启动中不可用', 'API members are not available in this run'));
     if (!providerId) throw new CoreError(400, L('请为 API 成员选择一个供应商', 'Choose a provider for the API member'));
     if (!model) throw new CoreError(400, L('请为 API 成员选择一个模型', 'Choose a model for the API member'));
@@ -838,6 +877,14 @@ export class Core {
         r.model.reasoningLevels.length
           ? L('模型「{m}」没有推理等级「{e}」，可选：{options}', 'The model “{m}” has no reasoning level “{e}”; available: {options}', { m: model, e: effort, options: r.model.reasoningLevels })
           : L('模型「{m}」没有推理等级可选', 'The model “{m}” has no reasoning levels to choose from', { m: model }),
+      );
+    }
+    if (speed !== null && !r.model.speeds.includes(speed)) {
+      throw new CoreError(
+        400,
+        r.model.speeds.length
+          ? L('模型「{m}」没有速度「{s}」，可选：{options}', 'The model “{m}” has no speed “{s}”; available: {options}', { m: model, s: speed, options: r.model.speeds })
+          : L('模型「{m}」没有更快的速度可选', 'The model “{m}” offers no faster speed', { m: model }),
       );
     }
   }
@@ -892,6 +939,7 @@ export class Core {
       displayName?: string;
       model?: string | null;
       effort?: string | null;
+      speed?: string | null;
       permissionMode?: PermissionMode | null;
       acknowledgePermissionRisk?: string;
       avatar?: string | null;
@@ -918,18 +966,22 @@ export class Core {
     const displayName = patch.displayName === undefined ? undefined : checkDisplayName(patch.displayName);
     const model = patch.model === undefined ? cur.model : normalizeOption(patch.model);
     const effort = patch.effort === undefined ? cur.effort : normalizeOption(patch.effort);
+    const speedIn = patch.speed === undefined ? cur.speed : normalizeOption(patch.speed);
+    const speed = cur.runtimeKind === 'chat' && speedIn === STANDARD_SPEED ? null : speedIn;
     const permissionMode = patch.permissionMode === undefined ? cur.permissionMode : checkPermissionMode(cur.runtimeKind, patch.permissionMode);
     if (permissionMode !== cur.permissionMode) checkPermissionRisk(permissionMode, patch.acknowledgePermissionRisk);
     if (permissionMode !== cur.permissionMode) await this.checkModeAvailable(cur.runtimeKind, permissionMode, cur.workspace);
-    const modelChanged = model !== cur.model || effort !== cur.effort;
+    // Like the model: applies from the next turn (Claude Code: the idle process restarts on the same session).
+    const modelChanged = model !== cur.model || effort !== cur.effort || speed !== cur.speed;
     if (patch.chrome !== undefined && cur.runtimeKind !== 'claude') throw new CoreError(400, L('只有 Claude Code 成员可以启用 Claude in Chrome', 'Only Claude Code members can use Claude in Chrome'));
     // A launch flag, like the model: the idle process is restarted on the same session before the next turn.
     const chromeChanged = patch.chrome !== undefined && patch.chrome !== cur.chrome;
     const configChanged = modelChanged || permissionMode !== cur.permissionMode || chromeChanged;
     if (patch.chat !== undefined && cur.runtimeKind !== 'chat') throw new CoreError(400, L('只有 API 成员有这些设置', 'Only API members have these settings'));
     if (modelChanged) {
-      if (cur.runtimeKind === 'chat') this.validateChatConfig(cur.providerId, model, effort);
-      else await this.validateModelConfig(cur.runtimeKind, model, effort, cur.workspace);
+      if (cur.runtimeKind === 'chat') {
+        this.validateChatConfig(cur.providerId, model, effort, speed);
+      } else await this.validateModelConfig(cur.runtimeKind, model, effort, cur.workspace, speed);
     }
     // Read again for every turn: applies from the member's next request.
     const chatChanged = patch.chat !== undefined && JSON.stringify(patch.chat) !== JSON.stringify(cur.chat);
@@ -943,6 +995,7 @@ export class Core {
       displayName,
       model,
       effort,
+      speed,
       permissionMode,
       ...(avatarChanged ? { avatar: patch.avatar || null } : {}),
       ...(languageChanged ? { language: patch.language ?? null } : {}),
@@ -1121,6 +1174,7 @@ export class Core {
     const wasDefault = this.store.defaultResponders(roomId).includes(agentId);
     this.store.removeMember(roomId, agentId);
     this.lastReply.delete(`${agentId}:${roomId}`);
+    this.dropSchedules(roomId, agentId);
     this.bus.publish({ type: 'member.removed', roomId, agentId });
     if (wasDefault) this.bus.publish({ type: 'room.updated', room: this.store.getRoom(roomId)! });
     this.systemNotice(roomId, N('agent.removed', { handle: agent.handle }));
@@ -1162,6 +1216,7 @@ export class Core {
     this.permission.delete(agentId);
     this.configPending.delete(agentId);
     for (const roomId of rooms) {
+      this.dropSchedules(roomId, agentId);
       this.bus.publish({ type: 'member.removed', roomId, agentId });
       if (defaultIn.has(roomId)) this.bus.publish({ type: 'room.updated', room: this.store.getRoom(roomId)! });
       this.systemNotice(roomId, N('agent.deleted', { name: agent.displayName, handle: agent.handle }));
@@ -1261,7 +1316,14 @@ export class Core {
    * runtime can take it gets the message inside that turn; `queued` lists the working members that get it with their
    * next turn instead. A command is always a turn of its own.
    */
-  sendUserMessage(roomId: string, body: string, clientMessageId: string, attachmentIds: string[] = [], steer = false): { message: Message; queued: SteerSkip[] } {
+  sendUserMessage(
+    roomId: string,
+    body: string,
+    clientMessageId: string,
+    attachmentIds: string[] = [],
+    steer = false,
+    scheduleId?: string,
+  ): { message: Message; queued: SteerSkip[] } {
     if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
     const text = body.replace(/\r\n/g, '\n');
     if (!text.trim() && !attachmentIds.length) throw new CoreError(400, 'message body is empty');
@@ -1299,7 +1361,7 @@ export class Core {
       }
     }
     const targets = command ? [command.agent] : this.targetsOf(roomId, text, null);
-    // No @ at all (an @ of a non-member still wakes nobody): the room's default responders, else the last replier.
+    // No @ at all (an @ of a non-member still wakes nobody): the room's default responders, else whom the user's previous message went to.
     if (!command && !parseMentions(text).length) targets.push(...this.implicitTargets(roomId));
     const safeBody = redactText(text.trim() ? text : '');
     const safeArgs = command ? redactText(command.args) : undefined;
@@ -1327,7 +1389,9 @@ export class Core {
                 ...(command.spec.action === 'skill' ? { skill: true as const } : {}),
               } satisfies MessageMeta,
             }
-          : {}),
+          : scheduleId
+            ? { meta: { type: 'scheduled', scheduleId } satisfies MessageMeta }
+            : {}),
       });
     } catch (err) {
       if (err instanceof AttachmentBindError) throw new CoreError(409, L('附件不存在、不属于这个群聊或已经发送过', 'The attachment does not exist, belongs to another chat, or was already sent'));
@@ -1536,6 +1600,218 @@ export class Core {
     return this.store.getMessage(messageId)!;
   }
 
+  // ---- scheduled tasks ----
+
+  createSchedule(roomId: string, input: CreateScheduleRequest): ScheduledTask {
+    if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
+    const agentIds = this.scheduleMembers(roomId, input.agentIds);
+    const prompt = this.schedulePrompt(input.prompt);
+    const repeat = this.scheduleRepeat(input.repeat);
+    const enabled = input.enabled !== false;
+    const nextRunAt = enabled ? this.firstRun(repeat) : null;
+    const schedule = this.store.insertSchedule({ roomId, agentIds, prompt, repeat, enabled, nextRunAt });
+    this.bus.publish({ type: 'schedule.updated', schedule });
+    this.armScheduler();
+    return schedule;
+  }
+
+  updateSchedule(roomId: string, id: string, patch: UpdateScheduleRequest): ScheduledTask {
+    const cur = this.store.getSchedule(id);
+    if (!cur || cur.roomId !== roomId) throw new CoreError(404, 'scheduled task not found');
+    this.sameScheduleRevision(cur, patch.revision);
+    const agentIds = patch.agentIds === undefined ? undefined : this.scheduleMembers(roomId, patch.agentIds);
+    const prompt = patch.prompt === undefined ? undefined : this.schedulePrompt(patch.prompt);
+    const repeat = patch.repeat === undefined ? cur.repeat : this.scheduleRepeat(patch.repeat);
+    const enabled = patch.enabled ?? cur.enabled;
+    // A new rule, or a task switched on again, counts from now; otherwise the planned time stays.
+    const retime = patch.repeat !== undefined || (enabled && !cur.enabled);
+    const nextRunAt = !enabled ? null : retime || !cur.nextRunAt ? this.firstRun(repeat) : cur.nextRunAt;
+    const schedule = this.store.updateSchedule(id, {
+      ...(agentIds !== undefined ? { agentIds } : {}),
+      ...(prompt !== undefined ? { prompt } : {}),
+      repeat,
+      enabled,
+      nextRunAt,
+      // Switching a member's task on is the user's confirmation of it.
+      ...(enabled ? { pending: false } : {}),
+    });
+    this.bus.publish({ type: 'schedule.updated', schedule });
+    this.armScheduler();
+    return schedule;
+  }
+
+  deleteSchedule(roomId: string, id: string): void {
+    const cur = this.store.getSchedule(id);
+    if (!cur || cur.roomId !== roomId) throw new CoreError(404, 'scheduled task not found');
+    this.store.deleteSchedule(id);
+    this.bus.publish({ type: 'schedule.deleted', roomId, scheduleId: id });
+    this.armScheduler();
+  }
+
+  /** The user acts on the task as they saw it: a change since (a member's edit, say) must be looked at first. */
+  private sameScheduleRevision(cur: ScheduledTask, revision: number | undefined): void {
+    if (revision !== undefined && revision !== cur.revision) {
+      throw new CoreError(409, L('这个定时任务刚被修改过，请看过现在的内容再操作', 'This task was just changed; look at what it says now and try again'));
+    }
+  }
+
+  /** Posts the task's prompt now; its planned times do not change. */
+  runScheduleNow(roomId: string, id: string, revision?: number): ScheduledTask {
+    const cur = this.store.getSchedule(id);
+    if (!cur || cur.roomId !== roomId) throw new CoreError(404, 'scheduled task not found');
+    this.sameScheduleRevision(cur, revision);
+    const at = new Date();
+    this.postSchedule(cur, `schedule:${id}:now:${randomUUID()}`);
+    const schedule = this.store.updateSchedule(id, { lastRunAt: at.toISOString(), lastResult: 'sent', lastError: null });
+    this.bus.publish({ type: 'schedule.updated', schedule });
+    return schedule;
+  }
+
+  /**
+   * Runs every enabled task that is due at `at`: posts its prompt, or records it as missed when it was due more than
+   * SCHEDULE_GRACE_MS ago (nothing is made up for later), then plans the next time. Called by the timer and at start.
+   */
+  runDueSchedules(at: Date = new Date()): void {
+    for (const s of this.store.dueSchedules(at.toISOString())) {
+      const due = new Date(s.nextRunAt!);
+      let result: 'sent' | 'missed' | 'failed' = 'missed';
+      let error: NoticeText | null = null;
+      if (at.getTime() - due.getTime() <= SCHEDULE_GRACE_MS) {
+        try {
+          this.postSchedule(s, `schedule:${s.id}:${due.toISOString()}`);
+          result = 'sent';
+        } catch (err) {
+          result = 'failed';
+          error = err instanceof CoreError && err.notice ? err.notice : L(errorText(err), errorText(err));
+        }
+      }
+      const next = nextRunAfter(s.repeat, at);
+      const schedule = this.store.updateSchedule(s.id, {
+        lastRunAt: due.toISOString(),
+        lastResult: result,
+        lastError: error,
+        nextRunAt: next ? next.toISOString() : null,
+        enabled: next !== null,
+      });
+      this.bus.publish({ type: 'schedule.updated', schedule });
+    }
+    this.armScheduler();
+  }
+
+  /** Sleeps until the soonest due task, at most a minute at a time (a changed clock or a wake from sleep is seen). */
+  private armScheduler(): void {
+    if (!this.started) return;
+    if (this.scheduleTimer) clearTimeout(this.scheduleTimer);
+    this.scheduleTimer = null;
+    const next = this.store.nextScheduleAt();
+    if (!next) return;
+    const wait = Math.max(0, Math.min(60_000, new Date(next).getTime() - Date.now()));
+    this.scheduleTimer = setTimeout(() => {
+      this.scheduleTimer = null;
+      try {
+        this.runDueSchedules();
+      } catch (err) {
+        console.warn(`scheduled tasks failed: ${errorText(err)}`);
+        this.armScheduler();
+      }
+    }, wait);
+    this.scheduleTimer.unref();
+  }
+
+  private postSchedule(s: ScheduledTask, clientMessageId: string): void {
+    let assignees: Agent[] | null = null;
+    if (s.agentIds === null) {
+      if (!this.store.listMembers(s.roomId).length) throw new CoreError(409, L('这个群聊里还没有成员', 'This chat has no members yet'));
+    } else {
+      assignees = s.agentIds.map((id) => this.store.getAgent(id)).filter((a): a is Agent => !!a && !a.deletedAt && this.store.isMember(s.roomId, a.id));
+      if (!s.agentIds.length || assignees.length < s.agentIds.length) {
+        throw new CoreError(409, L('有负责的成员已不在这个群聊中', 'An assigned member is no longer in this chat'));
+      }
+    }
+    if (s.createdBy) return this.postMemberSchedule(s, assignees, clientMessageId);
+    const to = assignees ? assignees.map((a) => '@' + a.handle).join(' ') : '@' + ALL_HANDLE;
+    this.sendUserMessage(s.roomId, `${to} ${s.prompt}`, clientMessageId, [], false, s.id);
+  }
+
+  /**
+   * A member's task: posted as that member's message (other members read it as an agent's words, never the user's),
+   * and delivered like a user message (outside any turn, not held by a paused chat): the user switched the task on.
+   */
+  private postMemberSchedule(s: ScheduledTask, assignees: Agent[] | null, clientMessageId: string): void {
+    const creator = this.store.getAgent(s.createdBy!);
+    if (!creator || creator.deletedAt || !this.store.isMember(s.roomId, creator.id)) {
+      throw new CoreError(409, L('创建这个定时任务的成员已不在这个群聊中', 'The member that created this task is no longer in this chat'));
+    }
+    // Only the user directs a restricted member: one assigned is an error, and `@all` passes over them (the creator included).
+    const restricted = assignees?.find((a) => this.isRestricted(a));
+    if (restricted) throw new CoreError(409, N('team.assignRestricted', { handle: restricted.handle }));
+    const targets = assignees ?? this.store.listMembers(s.roomId).filter((a) => !this.isRestricted(a));
+    if (!targets.length) throw new CoreError(409, L('这个群聊里没有能接收的成员', 'No member of this chat can receive it'));
+    const handles = assignees ? assignees.map((a) => a.handle) : [ALL_HANDLE];
+    if (this.store.findByClientMessageId(s.roomId, clientMessageId)) return;
+    const message = this.store.insertMessage({
+      roomId: s.roomId,
+      kind: 'chat',
+      senderKind: 'agent',
+      senderId: creator.id,
+      body: `${handles.map((h) => '@' + h).join(' ')} ${s.prompt}`,
+      status: 'complete',
+      mentions: handles,
+      clientMessageId,
+      meta: { type: 'scheduled', scheduleId: s.id },
+    });
+    this.bus.publish({ type: 'message.created', message });
+    this.deliver(message, targets, 'user', 0);
+  }
+
+  /**
+   * A member left the chat or was deleted: its tasks in the room go, it is taken off the others' assignees, and a task
+   * left with no assignee goes too.
+   */
+  private dropSchedules(roomId: string, agentId: string): void {
+    let dropped = false;
+    for (const s of this.store.listSchedules(roomId)) {
+      const rest = s.agentIds?.filter((id) => id !== agentId);
+      if (s.createdBy !== agentId && (!rest || rest.length === s.agentIds!.length)) continue;
+      if (s.createdBy === agentId || !rest!.length) {
+        this.store.deleteSchedule(s.id);
+        this.bus.publish({ type: 'schedule.deleted', roomId, scheduleId: s.id });
+        dropped = true;
+      } else {
+        this.bus.publish({ type: 'schedule.updated', schedule: this.store.updateSchedule(s.id, { agentIds: rest }) });
+      }
+    }
+    if (dropped) this.armScheduler();
+  }
+
+  /** The assignees as given, without repeats; each must be a member. null = every member. */
+  private scheduleMembers(roomId: string, agentIds: string[] | null): string[] | null {
+    if (agentIds === null) return null;
+    const ids = [...new Set(agentIds)];
+    if (!ids.length) throw new CoreError(400, L('请选择负责人', 'Choose an assignee'));
+    if (ids.some((id) => !this.store.isMember(roomId, id))) throw new CoreError(400, L('负责人必须是这个群聊的成员', 'The assignee must be a member of this chat'));
+    return ids;
+  }
+
+  private schedulePrompt(raw: string): string {
+    const prompt = raw.replace(/\r\n/g, '\n').trim();
+    if (!prompt) throw new CoreError(400, L('请填写要发送的内容', 'Enter what to send'));
+    if (prompt.length > SCHEDULE_PROMPT_MAX) throw new CoreError(400, L('内容太长（最多 {max} 字）', 'Too long (max {max} characters)', { max: SCHEDULE_PROMPT_MAX }));
+    return redactText(prompt);
+  }
+
+  private scheduleRepeat(raw: CreateScheduleRequest['repeat']) {
+    const r = normalizeRepeat(raw);
+    if ('error' in r) throw new CoreError(400, L(r.error[0], r.error[1]));
+    return r.repeat;
+  }
+
+  private firstRun(repeat: CreateScheduleRequest['repeat']): string {
+    const next = nextRunAfter(repeat, new Date());
+    if (!next) throw new CoreError(400, L('这个时间已经过去', 'That time has already passed'));
+    return next.toISOString();
+  }
+
   // ---- tasks (user side) ----
   createTask(roomId: string, input: { title: string; assigneeId?: string | null }, createdBy: string = 'user'): Task {
     if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
@@ -1739,6 +2015,117 @@ export class Core {
     return { task: this.taskView(args.title === undefined ? task : { ...task, title: args.title.trim(), titleRedacted: undefined, titleRedactionUncertain: undefined }) };
   }
 
+  teamListSchedules(id: TeamIdentity) {
+    this.assertTeamMember(id);
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const offset = -now.getTimezoneOffset();
+    return {
+      // Times of daily and weekly tasks are this computer's local time.
+      local_time: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`,
+      utc_offset: `${offset < 0 ? '-' : '+'}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`,
+      weekday: now.getDay(),
+      schedules: this.store.listSchedules(id.roomId).map((t) => this.scheduleView(t)),
+    };
+  }
+
+  /** A member's new task starts paused and pending: it runs only after the user switches it on. */
+  teamCreateSchedule(id: TeamIdentity, args: { prompt: string; repeat: ScheduleRepeat; assignees?: string[] | null }) {
+    this.assertTeamMember(id);
+    this.assertTeamWritable(id);
+    const agentIds = this.scheduleAssignees(id, args.assignees);
+    const prompt = this.schedulePrompt(args.prompt);
+    const repeat = this.memberScheduleRepeat(args.repeat);
+    this.firstRun(repeat);
+    const made = this.store.listSchedules(id.roomId).filter((t) => t.createdBy !== null).length;
+    if (made >= SCHEDULE_MEMBER_MAX_PER_ROOM) {
+      throw new CoreError(409, L('成员在这个群聊里最多可以建 {max} 个定时任务', 'Members can have at most {max} scheduled tasks in this chat', { max: SCHEDULE_MEMBER_MAX_PER_ROOM }));
+    }
+    const schedule = this.store.insertSchedule({ roomId: id.roomId, agentIds, prompt, repeat, enabled: false, nextRunAt: null, createdBy: id.agentId, pending: true });
+    this.bus.publish({ type: 'schedule.updated', schedule });
+    this.scheduleNotice(id, schedule, 'created');
+    return { schedule: this.scheduleView(schedule) };
+  }
+
+  /** A member changes only tasks it created; any change pauses the task until the user switches it on again. */
+  teamUpdateSchedule(id: TeamIdentity, args: { scheduleId: string; prompt?: string; repeat?: ScheduleRepeat; assignees?: string[] | null }) {
+    const cur = this.ownSchedule(id, args.scheduleId);
+    const agentIds = args.assignees === undefined ? cur.agentIds : this.scheduleAssignees(id, args.assignees);
+    const prompt = args.prompt === undefined ? cur.prompt : this.schedulePrompt(args.prompt);
+    const repeat = args.repeat === undefined ? cur.repeat : this.memberScheduleRepeat(args.repeat);
+    if (args.repeat !== undefined) this.firstRun(repeat);
+    const schedule = this.store.updateSchedule(cur.id, { agentIds, prompt, repeat, enabled: false, nextRunAt: null, pending: true });
+    this.bus.publish({ type: 'schedule.updated', schedule });
+    this.armScheduler();
+    this.scheduleNotice(id, schedule, 'changed');
+    return { schedule: this.scheduleView(schedule) };
+  }
+
+  teamDeleteSchedule(id: TeamIdentity, args: { scheduleId: string }) {
+    const cur = this.ownSchedule(id, args.scheduleId);
+    this.store.deleteSchedule(cur.id);
+    this.bus.publish({ type: 'schedule.deleted', roomId: id.roomId, scheduleId: cur.id });
+    this.armScheduler();
+    this.scheduleNotice(id, cur, 'deleted');
+    return { deleted: cur.id };
+  }
+
+  private ownSchedule(id: TeamIdentity, scheduleId: string): ScheduledTask {
+    this.assertTeamMember(id);
+    this.assertTeamWritable(id);
+    const cur = this.store.getSchedule(scheduleId);
+    if (!cur || cur.roomId !== id.roomId) throw new CoreError(404, L('没有这个定时任务', 'No such scheduled task'));
+    if (cur.createdBy !== id.agentId) throw new CoreError(403, L('只能修改或删除你自己建的定时任务', 'You can only change or delete scheduled tasks you created'));
+    return cur;
+  }
+
+  /** A member's choice of assignees: handles, `all` among them (null: every member), or none (itself). */
+  private scheduleAssignees(id: TeamIdentity, handles: string[] | null | undefined): string[] | null {
+    const list = (handles ?? []).map((h) => h.trim()).filter(Boolean);
+    if (list.some((h) => handleKey(h.replace(/^@/, '')) === ALL_HANDLE)) return null;
+    if (!list.length) return [id.agentId];
+    return [...new Set(list.map((h) => this.teamAssignee(id, h)!))];
+  }
+
+  private memberScheduleRepeat(raw: ScheduleRepeat): ScheduleRepeat {
+    const repeat = this.scheduleRepeat(raw);
+    if (repeat.kind === 'interval' && repeat.minutes < SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES) {
+      throw new CoreError(400, L('成员建的定时任务间隔至少 {min} 分钟', 'A scheduled task made by a member needs an interval of at least {min} minutes', { min: SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES }));
+    }
+    return repeat;
+  }
+
+  private scheduleView(t: ScheduledTask) {
+    return {
+      schedule_id: t.id,
+      assignees: this.scheduleHandles(t),
+      prompt: t.prompt,
+      repeat: t.repeat,
+      enabled: t.enabled,
+      waiting_for_user: t.pending,
+      next_run_at: t.nextRunAt,
+      last_run_at: t.lastRunAt,
+      last_result: t.lastResult,
+      created_by: t.createdBy ? '@' + this.handleOf(t.createdBy) : 'user',
+    };
+  }
+
+  private scheduleHandles(t: ScheduledTask): string[] {
+    return t.agentIds ? t.agentIds.map((a) => '@' + this.handleOf(a)) : ['@' + ALL_HANDLE];
+  }
+
+  private scheduleNotice(id: TeamIdentity, t: ScheduledTask, what: 'created' | 'changed' | 'deleted') {
+    const p = { handle: this.handleOf(id.agentId), assignees: this.scheduleHandles(t).join(' '), prompt: t.prompt.length > 60 ? `${t.prompt.slice(0, 60)}…` : t.prompt };
+    this.systemNotice(
+      id.roomId,
+      what === 'created'
+        ? L('@{handle} 新建了定时任务「{prompt}」（负责人 {assignees}），在定时任务里开启后才会运行', '@{handle} created the scheduled task “{prompt}” (assignees {assignees}); it runs once you switch it on under Scheduled tasks', p)
+        : what === 'changed'
+          ? L('@{handle} 修改了定时任务「{prompt}」，已暂停，重新开启后才会运行', '@{handle} changed the scheduled task “{prompt}”; it is paused until you switch it on again', p)
+          : L('@{handle} 删除了定时任务「{prompt}」', '@{handle} deleted the scheduled task “{prompt}”', p),
+    );
+  }
+
   /** Test helper: resolves when no agent has queued or running work. */
   whenIdle(): Promise<void> {
     if (this.isIdle()) return Promise.resolve();
@@ -1749,6 +2136,8 @@ export class Core {
     this.started = false;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
+    if (this.scheduleTimer) clearTimeout(this.scheduleTimer);
+    this.scheduleTimer = null;
     for (const st of this.agents.values()) {
       if (st.kick) clearImmediate(st.kick);
       st.kick = null;
@@ -1792,13 +2181,16 @@ export class Core {
   }
 
   /**
-   * Where a user message without an @mention goes: the room's default responders, else the member that last posted a
-   * chat message, else nobody.
+   * Where a user message without an @mention goes: the room's default responders, else the members the user's previous
+   * message went to (even when their turn ended without a word), else the member that last posted a chat message,
+   * else nobody.
    */
   private implicitTargets(roomId: string): Agent[] {
     const members = this.store.listMembers(roomId);
     const defaults = new Set(this.store.defaultResponders(roomId));
     if (defaults.size) return members.filter((a) => defaults.has(a.id));
+    const previous = new Set(this.store.lastUserRecipients(roomId));
+    if (previous.size) return members.filter((a) => previous.has(a.id));
     const last = this.store.lastReplier(roomId);
     return members.filter((a) => a.id === last);
   }
@@ -1936,7 +2328,13 @@ export class Core {
     const cur = this.store.getDelivery(d.id);
     // Removed meanwhile (the room was cleared or deleted, or the member left).
     if (cur?.state !== 'queued') return;
-    if (!answer.ok) return queue();
+    if (!answer.ok && !answer.unknown) return queue();
+    if (!answer.ok) {
+      // Sent, but whether the turn took it is not known: the runtime may have acted on it, so it is not sent again.
+      this.publishDelivery(this.store.updateDelivery(d.id, { state: 'dispatched', replyMessageId: live.slotId(), stamp: 'dispatched' }));
+      this.publishDelivery(this.store.updateDelivery(d.id, { state: 'unknown', error: answer.error, stamp: 'finished' }));
+      return;
+    }
     const key = `${agent.id}:${room.id}`;
     this.steeredIds.set(key, (this.steeredIds.get(key) ?? new Set()).add(m.id));
     this.publishDelivery(this.store.updateDelivery(d.id, { state: 'dispatched', replyMessageId: live.slotId(), stamp: 'dispatched' }));
@@ -2396,7 +2794,7 @@ export class Core {
         {
           text: bare ? `/${command!.name}${command!.args ? ` ${command!.args}` : ''}` : text,
           messageId: source.id,
-          config: { model: agent.model, effort: agent.effort, permissionMode: agent.permissionMode, ...(agent.chrome ? { chrome: true } : {}) },
+          config: { model: agent.model, effort: agent.effort, permissionMode: agent.permissionMode, ...(agent.chrome ? { chrome: true } : {}), ...(agent.speed ? { speed: agent.speed } : {}) },
           ...(attachments.length ? { attachments } : {}),
           ...(command
             ? { command: { name: command.name, args: command.args, ...(command.skill ? { skill: { path: this.skillPath(agent.id, command.name) } } : {}) } }
@@ -2923,6 +3321,10 @@ function checkPermissionMode(kind: RuntimeKind, v: string | null | undefined): P
     );
   }
   return t as PermissionMode;
+}
+
+function speedUnsupported(runtime: string): CoreError {
+  return new CoreError(400, L('{runtime} 成员没有速度可选', '{runtime} members have no speed to choose', { runtime }));
 }
 
 function normalizeOption(v: string | null | undefined): string | null {

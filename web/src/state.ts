@@ -6,6 +6,7 @@ import type {
   Room,
   RoomSnapshot,
   RuntimeDescriptor,
+  ScheduledTask,
   ServerEvent,
   Task,
 } from '../../shared/protocol.ts';
@@ -23,6 +24,8 @@ export interface State {
   /** Delivery records per loaded room (push queue stages). */
   deliveries: Record<string, DeliveryInfo[]>;
   tasks: Record<string, Task[]>;
+  /** Scheduled tasks per loaded room. */
+  schedules: Record<string, ScheduledTask[]>;
   connection: ConnectionState;
   /** Default member avatar per runtime (for members without their own picture). */
   avatarDefaults: AvatarDefaults;
@@ -37,6 +40,7 @@ export const initialState: State = {
   members: {},
   deliveries: {},
   tasks: {},
+  schedules: {},
   connection: 'connecting',
   avatarDefaults: {},
 };
@@ -82,7 +86,7 @@ export function reducer(state: State, action: Action): State {
     case 'select':
       return { ...state, currentRoomId: action.roomId };
     case 'snapshot': {
-      const { room, members, messages, deliveries, tasks } = action.snapshot;
+      const { room, members, messages, deliveries, tasks, schedules } = action.snapshot;
       const agents = { ...state.agents };
       for (const m of members) agents[m.id] = m;
       return {
@@ -92,6 +96,7 @@ export function reducer(state: State, action: Action): State {
         members: { ...state.members, [room.id]: members.map((m) => m.id) },
         deliveries: { ...state.deliveries, [room.id]: deliveries },
         tasks: { ...state.tasks, [room.id]: tasks },
+        schedules: { ...state.schedules, [room.id]: schedules ?? [] },
         rooms: state.rooms.map((r) => (r.id === room.id ? room : r)),
       };
     }
@@ -132,6 +137,7 @@ function applyEvent(state: State, e: ServerEvent): State {
         members: without(state.members, e.roomId),
         deliveries: without(state.deliveries, e.roomId),
         tasks: without(state.tasks, e.roomId),
+        schedules: without(state.schedules, e.roomId),
       };
     }
     case 'delivery.updated': {
@@ -143,6 +149,16 @@ function applyEvent(state: State, e: ServerEvent): State {
       const list = state.tasks[e.task.roomId];
       if (!list) return state;
       return { ...state, tasks: { ...state.tasks, [e.task.roomId]: upsertById(list, e.task) } };
+    }
+    case 'schedule.updated': {
+      const list = state.schedules[e.schedule.roomId];
+      if (!list) return state;
+      return { ...state, schedules: { ...state.schedules, [e.schedule.roomId]: upsertById(list, e.schedule) } };
+    }
+    case 'schedule.deleted': {
+      const list = state.schedules[e.roomId];
+      if (!list) return state;
+      return { ...state, schedules: { ...state.schedules, [e.roomId]: list.filter((x) => x.id !== e.scheduleId) } };
     }
     case 'agent.created':
     case 'agent.updated':

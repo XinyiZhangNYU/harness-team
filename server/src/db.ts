@@ -770,6 +770,84 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE avatar_defaults_v31 RENAME TO avatar_defaults;
     `,
   },
+  {
+    version: 32,
+    name: 'scheduled tasks',
+    // A prompt sent to one member of a chat at set times. agent_id has no foreign key: agents are only soft-deleted
+    // (the Core removes the member's schedules when it leaves the chat), and the agents table is rebuilt by later
+    // runtime migrations.
+    sql: `
+      CREATE TABLE schedules (
+        id           TEXT PRIMARY KEY,
+        room_id      TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        agent_id     TEXT NOT NULL,
+        prompt       TEXT NOT NULL,
+        repeat_json  TEXT NOT NULL,
+        enabled      INTEGER NOT NULL CHECK (enabled IN (0,1)),
+        next_run_at  TEXT,
+        last_run_at  TEXT,
+        last_result  TEXT CHECK (last_result IN ('sent','missed','failed')),
+        last_error   TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+      CREATE INDEX schedules_room ON schedules(room_id, created_at);
+      CREATE INDEX schedules_due ON schedules(enabled, next_run_at);
+    `,
+  },
+  {
+    version: 33,
+    name: 'scheduled tasks created by members',
+    // created_by: the member's agent id (no foreign key, like agent_id); NULL = the user. pending: waits for the user.
+    sql: `
+      ALTER TABLE schedules ADD COLUMN created_by TEXT;
+      ALTER TABLE schedules ADD COLUMN pending INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0,1));
+    `,
+  },
+  {
+    version: 34,
+    name: 'scheduled tasks for several members',
+    // agent_ids: a JSON array of agent ids (no foreign keys, like agent_id was); NULL = every member of the chat (@all).
+    // Nothing references schedules, so a plain rebuild.
+    sql: `
+      CREATE TABLE schedules_v34 (
+        id           TEXT PRIMARY KEY,
+        room_id      TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        agent_ids    TEXT,
+        prompt       TEXT NOT NULL,
+        repeat_json  TEXT NOT NULL,
+        enabled      INTEGER NOT NULL CHECK (enabled IN (0,1)),
+        next_run_at  TEXT,
+        last_run_at  TEXT,
+        last_result  TEXT CHECK (last_result IN ('sent','missed','failed')),
+        last_error   TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        created_by   TEXT,
+        pending      INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0,1))
+      );
+      INSERT INTO schedules_v34 (id, room_id, agent_ids, prompt, repeat_json, enabled, next_run_at, last_run_at, last_result, last_error,
+                                 created_at, updated_at, created_by, pending)
+        SELECT id, room_id, json_array(agent_id), prompt, repeat_json, enabled, next_run_at, last_run_at, last_result, last_error,
+               created_at, updated_at, created_by, pending FROM schedules;
+      DROP TABLE schedules;
+      ALTER TABLE schedules_v34 RENAME TO schedules;
+      CREATE INDEX schedules_room ON schedules(room_id, created_at);
+      CREATE INDEX schedules_due ON schedules(enabled, next_run_at);
+    `,
+  },
+  {
+    version: 35,
+    name: 'scheduled task revisions',
+    // revision: goes up when the assignees, prompt or rule change, so switching a task on confirms the content shown.
+    sql: `ALTER TABLE schedules ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;`,
+  },
+  {
+    version: 36,
+    name: 'usage without a known price',
+    // unpriced: served at a speed tier with no known price, so the summary does not fill in the standard list price.
+    sql: `ALTER TABLE usage_records ADD COLUMN unpriced INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];
 
 /**

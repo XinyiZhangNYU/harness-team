@@ -29,10 +29,10 @@ function perLevel(m: Obj, levels: string[]): boolean {
 }
 
 /**
- * Checks a reasoning mapping against the model's tags. Returns null when fine, else the problem (in English; the UI
- * shows it as is next to the field).
+ * Checks a reasoning mapping against the model's tags (or a speed mapping against its speeds, with `slot` "{speed}").
+ * Returns null when fine, else the problem (in English; the UI shows it as is next to the field).
  */
-export function mappingProblem(text: string, levels: string[]): string | null {
+export function mappingProblem(text: string, levels: string[], slot = '{level}'): string | null {
   let m: Obj | null;
   try {
     m = parseObject(text, 'mapping');
@@ -44,9 +44,9 @@ export function mappingProblem(text: string, levels: string[]): string | null {
   const keys = Object.keys(m);
   const tags = keys.filter((k) => levels.includes(k));
   if (tags.length && tags.length !== keys.length) return `mixes tags (${tags.join(', ')}) with other keys`;
-  if (!JSON.stringify(m).includes('{level}')) {
+  if (!JSON.stringify(m).includes(slot)) {
     if (!levels.length) return null;
-    return 'neither a "{level}" template nor one entry per tag';
+    return `neither a "${slot}" template nor one entry per tag`;
   }
   return null;
 }
@@ -69,11 +69,11 @@ export function mergeInto(target: Obj, patch: Obj): Obj {
 }
 
 /** The body fragment a mapping gives for `level` (null when the mapping has nothing for it). */
-export function mappingFor(text: string, levels: string[], level: string): Obj | null {
+export function mappingFor(text: string, levels: string[], level: string, slot = '{level}'): Obj | null {
   const m = parseObject(text, 'mapping');
   if (!m) return null;
   if (perLevel(m, levels)) return isObj(m[level]) ? (m[level] as Obj) : null;
-  return replaceStrings(m, '{level}', level) as Obj;
+  return replaceStrings(m, slot, level) as Obj;
 }
 
 /** The extra body fields with "{session}" replaced. */

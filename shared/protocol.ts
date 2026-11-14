@@ -154,6 +154,54 @@ export interface Task {
 }
 
 /**
+ * When a scheduled task runs, in the local time of the machine the server runs on. `time` is "HH:MM" (24 h); `days`
+ * are weekdays, 0 = Sunday.
+ */
+export type ScheduleRepeat =
+  | { kind: 'once'; at: string }
+  | { kind: 'daily'; time: string }
+  | { kind: 'weekly'; time: string; days: number[] }
+  | { kind: 'interval'; minutes: number };
+
+/** Shortest gap between two runs of an `interval` task. */
+export const SCHEDULE_MIN_INTERVAL_MINUTES = 5;
+/** The same for a task a member creates through Team MCP. */
+export const SCHEDULE_MEMBER_MIN_INTERVAL_MINUTES = 30;
+/** How many tasks the members of one chat may have created at once. */
+export const SCHEDULE_MEMBER_MAX_PER_ROOM = 10;
+
+/**
+ * A prompt sent to one member of a chat at set times. When it runs, it is posted as `@handle prompt` and delivered like
+ * a message from the user (a busy member gets it after its current turn): as the user's own message when the user set
+ * it up, as the creating member's message when a member did (Team MCP create_schedule). A member's task starts paused
+ * and `pending`, and runs only after the user switches it on. A run that was due while the app was closed or the
+ * computer slept is not made up for later.
+ */
+export interface ScheduledTask {
+  id: string;
+  roomId: string;
+  /** The assignees, in order (at least one); null = every member of the chat (posted as `@all`). */
+  agentIds: string[] | null;
+  prompt: string;
+  repeat: ScheduleRepeat;
+  /** false = paused (or a one-time task that already ran or was missed). */
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  /** How the last due time ended: posted, missed (the app was not running then), or failed (`lastError`). */
+  lastResult: 'sent' | 'missed' | 'failed' | null;
+  lastError?: NoticeText;
+  /** The member that created it through Team MCP; null = the user. */
+  createdBy: string | null;
+  /** A member's task the user has not switched on since the member created or changed it: it does not run on its own. */
+  pending: boolean;
+  /** Goes up whenever the assignees, prompt or rule change; switching on and running now name the one the user saw. */
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * Delivery of one message to one agent. Stages are recorded separately: stored (message row) → queued/held →
  * dispatched (sent to the runtime) → accepted (runtime confirmed the native turn) → replied (first output observed)
  * → completed / interrupted / failed. `unknown` = the Core stopped after dispatch; never re-run automatically.
@@ -246,6 +294,12 @@ export interface Agent {
    * are available when the extension is installed and connected. Each tool call still asks through approvals.
    */
   chrome: boolean | null;
+  /**
+   * Codex and Claude Code members: the speed chosen for this member, one of the model's RuntimeModelOption.speeds or
+   * STANDARD_SPEED. null = follow the runtime's own configuration (Codex service_tier, Claude Code fastMode); nothing is sent.
+   * API members: one of the model's ChatModelFields.speeds; null = the standard speed (nothing is sent).
+   */
+  speed: string | null;
 }
 
 /** A member avatar: a base64 WebP / PNG / JPEG data URL, as the page makes it (128 px square). */
@@ -302,7 +356,7 @@ export type RuntimeBilling = 'subscription' | 'metered_api';
  */
 export type ClaudePermissionMode = 'manual' | 'acceptEdits' | 'plan' | 'auto' | 'dontAsk' | 'bypassPermissions';
 export type CodexPermissionMode = 'read-only' | 'workspace-write' | 'untrusted' | 'auto-review' | 'full-access';
-export type AntigravityPermissionMode = 'default' | 'accept-edits' | 'plan' | 'skip-permissions';
+export type AntigravityPermissionMode = 'default' | 'accept-edits' | 'auto' | 'plan' | 'skip-permissions';
 export type OpenCodePermissionMode = 'build' | 'plan';
 export type CursorPermissionMode = 'agent' | 'plan' | 'ask';
 export type KimiPermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
@@ -320,7 +374,7 @@ export type PermissionMode =
 export const PERMISSION_MODES: Record<RuntimeKind, readonly PermissionMode[]> = {
   claude: ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
   codex: ['read-only', 'workspace-write', 'untrusted', 'auto-review', 'full-access'],
-  antigravity: ['default', 'accept-edits', 'plan', 'skip-permissions'],
+  antigravity: ['default', 'accept-edits', 'auto', 'plan', 'skip-permissions'],
   dsh: ['read-only', 'workspace-write', 'full-access'],
   opencode: ['build', 'plan'],
   cursor: ['agent', 'plan', 'ask'],
@@ -389,6 +443,25 @@ export interface RuntimeModelOption {
   isDefault: boolean;
   /** How this model is billed when the runtime's model id tells (absent = the runtime's billing). */
   billing?: RuntimeBilling | null;
+  /** Faster tiers the runtime offers for this model on this account (Codex model/list serviceTiers, Claude Code fast mode). */
+  speeds?: RuntimeSpeedOption[];
+}
+
+/** Standard speed chosen explicitly: sent as such, so a faster tier in the runtime's own configuration is not used. */
+export const STANDARD_SPEED = 'standard';
+
+/** Runtimes whose members can choose a speed (Agent.speed). */
+export const SPEED_RUNTIMES: ReadonlySet<RuntimeKind> = new Set<RuntimeKind>(['codex', 'claude']);
+
+/** A faster tier, as the runtime itself reports it. */
+export interface RuntimeSpeedOption {
+  /** Sent back to the runtime: the Codex service tier id, or "fast" for Claude Code fast mode. */
+  id: string;
+  name: string;
+  description?: Localized | null;
+  /** False when the runtime reports that this account cannot use it now; `reason` says why. */
+  available: boolean;
+  reason?: Localized | null;
 }
 
 /** Where a recent workspace was found: Codex threads, Claude Code session logs, or existing Harness Team members. */
@@ -436,7 +509,7 @@ export interface RuntimeModelCatalog {
   error: Localized | null;
   models: RuntimeModelOption[];
   /** What "跟随默认配置" resolves to right now, when the runtime reports it. */
-  nativeDefault: { model: string | null; effort: string | null; efforts: string[]; note?: Localized | null } | null;
+  nativeDefault: { model: string | null; effort: string | null; efforts: string[]; speeds?: RuntimeSpeedOption[]; note?: Localized | null } | null;
   /**
    * Whether each of PERMISSION_MODES[runtimeKind] can be used on this machine (for the catalog's folder), as the
    * runtime itself reports it. Omitted when it could not be checked: every mode is then offered and the runtime's own
@@ -549,6 +622,8 @@ export type MessageMeta =
    * ALL_HANDLE.
    */
   | { type: 'command'; agentId: string; name: string; args: string; skill?: true }
+  /** A user message posted by a scheduled task when it ran (an ordinary chat message otherwise). */
+  | { type: 'scheduled'; scheduleId: string }
   /** System notice written by the server: `notice` is the translatable form of the body. */
   | {
       type: 'notice';
@@ -812,6 +887,9 @@ export type ServerEvent =
   | { type: 'room.deleted'; eventSeq: number; roomId: string }
   | { type: 'delivery.updated'; eventSeq: number; delivery: DeliveryInfo }
   | { type: 'task.updated'; eventSeq: number; task: Task }
+  /** A scheduled task was created, changed or ran. */
+  | { type: 'schedule.updated'; eventSeq: number; schedule: ScheduledTask }
+  | { type: 'schedule.deleted'; eventSeq: number; roomId: string; scheduleId: string }
   /** The default member avatars changed (set or removed in the settings or the member dialog). */
   | { type: 'avatar-defaults.updated'; eventSeq: number; defaults: AvatarDefaults }
   /** The installed runtimes were detected again (Check again in the add-member form). */
@@ -847,6 +925,8 @@ export interface CreateAgentRequest {
   model?: string | null;
   /** Effort supported by the chosen model; omitted/null = the runtime's default. */
   effort?: string | null;
+  /** One of the model's speeds or STANDARD_SPEED; omitted/null = follow the runtime's own configuration. */
+  speed?: string | null;
   /** One of PERMISSION_MODES[runtimeKind]; omitted/null = follow the user's own runtime configuration. */
   permissionMode?: PermissionMode | null;
   /** PERMISSION_WARNING_VERSION, sent only after the user confirmed the warning for a mode in RISKY_PERMISSION_MODES. */
@@ -870,6 +950,7 @@ export interface UpdateAgentRequest {
   displayName?: string;
   model?: string | null;
   effort?: string | null;
+  speed?: string | null;
   permissionMode?: PermissionMode | null;
   /** PERMISSION_WARNING_VERSION, sent only after the user confirmed the warning for a mode in RISKY_PERMISSION_MODES. */
   acknowledgePermissionRisk?: string;
@@ -951,6 +1032,7 @@ export interface RoomSnapshot {
   /** Deliveries whose source message is in `messages`. */
   deliveries: DeliveryInfo[];
   tasks: Task[];
+  schedules: ScheduledTask[];
 }
 
 export interface UpdateRoomRequest {
@@ -967,6 +1049,23 @@ export interface UpdateTaskRequest {
   title?: string;
   status?: TaskStatus;
   assigneeId?: string | null;
+}
+
+export interface CreateScheduleRequest {
+  /** One or more members; null = every member (`@all`). */
+  agentIds: string[] | null;
+  prompt: string;
+  repeat: ScheduleRepeat;
+  enabled?: boolean;
+}
+
+export interface UpdateScheduleRequest {
+  agentIds?: string[] | null;
+  prompt?: string;
+  repeat?: ScheduleRepeat;
+  enabled?: boolean;
+  /** The task's `revision` the user saw: refused (409) when it changed since. */
+  revision?: number;
 }
 
 export interface ApiError {
@@ -1074,6 +1173,10 @@ export interface ChatModelFields {
   reasoningLevels: string[];
   /** JSON text merged into the request body: a "{level}" template, or one entry per tag. '' = none. */
   reasoningMapping: string;
+  /** Faster tiers a member can ask this model for (e.g. fast, ultrafast, priority); empty = only the standard speed. */
+  speeds: string[];
+  /** JSON text merged into the request body for a chosen speed: a "{speed}" template, or one entry per tier. '' = none. */
+  speedMapping: string;
   /** JSON object text merged into every request body ("{session}" = a stable hash of member and chat). '' = none. */
   extraBody: string;
   /** JSON object text of extra request headers (string values, "{session}" allowed). '' = none. */
@@ -1088,7 +1191,7 @@ export interface ChatModelFields {
 }
 export const CHAT_MODEL_FIELD_NAMES = [
   'displayName', 'enabled', 'contextTokens', 'maxOutputTokens', 'image', 'pdf', 'tools', 'webSearch', 'reasoningLevels',
-  'reasoningMapping', 'extraBody', 'extraHeaders', 'explicitCache', 'replayReasoning', 'compactAt', 'price',
+  'reasoningMapping', 'speeds', 'speedMapping', 'extraBody', 'extraHeaders', 'explicitCache', 'replayReasoning', 'compactAt', 'price',
 ] as const satisfies readonly (keyof ChatModelFields)[];
 
 export interface ChatModel extends ChatModelFields {
@@ -1176,5 +1279,7 @@ export interface ChatModelTest {
   text: string;
   /** Tokens as the API reported them (input without cache reads; output with reasoning). */
   usage: { input: number; cacheRead: number; cacheWrite: number; output: number; reasoning: number } | null;
+  /** The service tier / speed the API reported using (null = it did not say). */
+  tier: string | null;
   error: Localized | null;
 }

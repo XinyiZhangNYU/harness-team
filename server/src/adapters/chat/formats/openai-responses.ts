@@ -171,6 +171,7 @@ export const openaiResponses: WireFormat = {
       stopDetail: stop === 'other' || stop === 'refusal' ? (incomplete?.reason ?? (final ? null : 'the stream ended before the response completed')) : null,
       usage: final?.usage ? responsesUsage(final.usage as Record<string, unknown>) : null,
       webSearches: searches,
+      tier: typeof final?.service_tier === 'string' && final.service_tier ? final.service_tier : null,
     };
   },
 

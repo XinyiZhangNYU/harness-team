@@ -16,12 +16,13 @@ import type {
   RuntimeDescriptor,
   RuntimeModelCatalog,
   RuntimeModelOption,
+  RuntimeSpeedOption,
   FileChange,
   PermissionMode,
   PermissionModeAvailability,
   RuntimeBilling,
 } from '../../../../shared/protocol.ts';
-import { PERMISSION_MODES } from '../../../../shared/protocol.ts';
+import { PERMISSION_MODES, STANDARD_SPEED } from '../../../../shared/protocol.ts';
 import { claudeLimitName, L, type Localized, N, NoticeError, type NoticeText, zhText } from '../../../../shared/notices.ts';
 import {
   cwdKey as dirKey,
@@ -118,6 +119,8 @@ export function modelArgs(cfg: ModelConfig | null | undefined): string[] {
   if (cfg?.model) out.push('--model', cfg.model);
   if (cfg?.effort) out.push('--effort', cfg.effort);
   if (cfg?.chrome) out.push('--chrome');
+  // Fast mode is an opt-in setting for SDK / -p use; standard turns it off even when the user's own settings have it.
+  if (cfg?.speed) out.push('--settings', JSON.stringify({ fastMode: cfg.speed !== STANDARD_SPEED }));
   if (cfg?.permissionMode) {
     if (!PERMISSION_MODES.claude.includes(cfg.permissionMode)) {
       throw new NoticeError(L('内部错误：拒绝使用权限模式 {mode}', 'Internal error: refusing the permission mode {mode}', { mode: cfg.permissionMode }));
@@ -131,6 +134,7 @@ const sameConfig = (a: ModelConfig, b: ModelConfig) =>
   (a.model ?? null) === (b.model ?? null) &&
   (a.effort ?? null) === (b.effort ?? null) &&
   (a.permissionMode ?? null) === (b.permissionMode ?? null) &&
+  (a.speed ?? null) === (b.speed ?? null) &&
   !!a.chrome === !!b.chrome;
 
 /** Claude Code's own name for a mode: `manual` is the CLI's alias of its internal "default". */
@@ -164,6 +168,13 @@ export function claudePermission(reported: unknown, want: PermissionMode | null 
 }
 
 const CATALOG_TTL_MS = 10 * 60_000;
+/**
+ * Fast mode reported as unavailable is asked again sooner: right after a while without use Claude Code can report
+ * usage credits as off before it has read the account's state (seen with 2.1.319; a probe seconds later reports "on").
+ */
+const FAST_OFF_TTL_MS = 60_000;
+const catalogTtl = (c: RuntimeModelCatalog) =>
+  [...c.models, ...(c.nativeDefault ? [c.nativeDefault] : [])].some((m) => m.speeds?.some((s) => !s.available)) ? FAST_OFF_TTL_MS : CATALOG_TTL_MS;
 
 /**
  * Modes Claude Code itself can refuse on a machine (settings `disableBypassPermissionsMode` / `disableAutoMode`, managed
@@ -212,6 +223,8 @@ export function catalogFromInit(init: any, applied: { model?: unknown; effort?: 
   const levels = (m: any): string[] =>
     m?.supportsEffort === false ? [] : Array.isArray(m?.supportedEffortLevels) ? m.supportedEffortLevels.map(String) : [];
   const defResolved = typeof def?.resolvedModel === 'string' ? def.resolvedModel : null;
+  const fast = claudeFastSpeed(init);
+  const speeds = (m: any): RuntimeSpeedOption[] | undefined => (fast === undefined ? undefined : m?.supportsFastMode === true ? [fast] : []);
   const models: RuntimeModelOption[] = raw
     .filter((m) => m && typeof m.value === 'string' && m.value && m.value !== 'default')
     .map((m) => ({
@@ -222,6 +235,7 @@ export function catalogFromInit(init: any, applied: { model?: unknown; effort?: 
       efforts: levels(m),
       defaultEffort: null,
       isDefault: false,
+      ...(speeds(m) ? { speeds: speeds(m) } : {}),
     }));
   const first = models.find((m) => defResolved && m.resolvedModel === defResolved);
   if (first) first.isDefault = true;
@@ -237,9 +251,35 @@ export function catalogFromInit(init: any, applied: { model?: unknown; effort?: 
       model: appliedModel ?? defResolved,
       effort: appliedEffort,
       efforts: def ? levels(def) : [],
+      ...(def && speeds(def) ? { speeds: speeds(def) } : {}),
       note: def ? L('Claude Code 的默认模型（{name}）', 'Claude Code’s default model ({name})', { name: def.displayName ?? 'Default' }) : null,
     },
     fetchedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Fast mode as `initialize` reports it for a process started with `--settings {"fastMode":true}`: available when the
+ * state is "on", otherwise with Claude Code's reason (e.g. usage credits off). undefined when the process did not opt
+ * in (sdk_opt_in_required) or the CLI does not report fast mode: nothing is known then.
+ */
+export function claudeFastSpeed(init: any): RuntimeSpeedOption | undefined {
+  const state = init?.fast_mode_state;
+  const why = typeof init?.fast_mode_disabled_reason === 'string' ? init.fast_mode_disabled_reason : null;
+  if (typeof state !== 'string' || why === 'sdk_opt_in_required') return undefined;
+  const base = {
+    id: 'fast',
+    name: 'Fast',
+    description: L('更快的输出；从第一个 token 起按用量额度计费', 'Faster output; billed to usage credits from the first token'),
+  };
+  if (state === 'on') return { ...base, available: true, reason: null };
+  return {
+    ...base,
+    available: false,
+    reason:
+      why === 'extra_usage_disabled'
+        ? L('快速模式按用量额度计费，这个账户没有开启用量额度', 'Fast mode is billed to usage credits, which are off for this account')
+        : L('Claude Code 报告快速模式不可用（{why}）', 'Claude Code reports that fast mode is unavailable ({why})', { why: why ?? state }),
   };
 }
 
@@ -359,7 +399,13 @@ export class ClaudeAdapter implements RuntimeAdapter {
       resumeId ?? randomUUID(),
       !!resumeId,
       args.teamMcp,
-      { model: args.agent.model, effort: args.agent.effort, permissionMode: args.agent.permissionMode, ...(args.agent.chrome ? { chrome: true } : {}) },
+      {
+        model: args.agent.model,
+        effort: args.agent.effort,
+        permissionMode: args.agent.permissionMode,
+        ...(args.agent.speed ? { speed: args.agent.speed } : {}),
+        ...(args.agent.chrome ? { chrome: true } : {}),
+      },
       args.instructions ?? null,
       args.readableDirs ?? [],
     );
@@ -384,6 +430,15 @@ export class ClaudeAdapter implements RuntimeAdapter {
     // default reported by the last flag-free probe.
     if (this.catalog?.value.nativeDefault) cat.nativeDefault = { ...this.catalog.value.nativeDefault, efforts: cat.nativeDefault?.efforts ?? [] };
     else cat.nativeDefault = cat.nativeDefault ? { ...cat.nativeDefault, effort: null } : null;
+    // A session started without fast mode reports nothing about it: keep what the last probe found.
+    if (claudeFastSpeed(init) === undefined) {
+      const prev = this.catalog?.value;
+      for (const m of cat.models) {
+        const speeds = prev?.models.find((x) => x.id === m.id)?.speeds;
+        if (speeds) m.speeds = speeds;
+      }
+      if (cat.nativeDefault && prev?.nativeDefault?.speeds) cat.nativeDefault.speeds = prev.nativeDefault.speeds;
+    }
     this.catalog = { at: Date.now(), cwd, value: cat };
   }
 
@@ -453,7 +508,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
 
   private modelCatalog(opts: { refresh?: boolean; cwd?: string | null }): Promise<RuntimeModelCatalog> {
     const c = this.catalog;
-    if (c && !opts.refresh && Date.now() - c.at < CATALOG_TTL_MS && c.value.nativeDefault?.model !== undefined) return Promise.resolve(c.value);
+    if (c && !opts.refresh && Date.now() - c.at < catalogTtl(c.value) && c.value.nativeDefault?.model !== undefined) return Promise.resolve(c.value);
     if (!this.probing) {
       this.probing = this.probe(opts.cwd ?? null).finally(() => {
         this.probing = null;
@@ -475,7 +530,8 @@ export class ClaudeAdapter implements RuntimeAdapter {
     const problem = this.nativeProblem();
     if (problem) return fail(problem);
     const o = this.opts;
-    const args = [...(o.argsPrefix ?? []), ...CLAUDE_FLAGS, '--no-session-persistence', '--session-id', randomUUID()];
+    // Opted in to fast mode only so `initialize` reports whether this account can use it (no message is sent).
+    const args = [...(o.argsPrefix ?? []), ...CLAUDE_FLAGS, '--no-session-persistence', '--session-id', randomUUID(), '--settings', JSON.stringify({ fastMode: true })];
     const env = nativeClaudeEnv(o.baseEnv ?? process.env);
     const dir = cwd ?? tmpdir();
     const proc = new StreamJsonProcess(o.command, args, { cwd: dir, env, killTree: o.killTree }, { onMessage() {}, onExit() {} });
@@ -599,6 +655,8 @@ class ClaudeSession implements AgentSession {
   permission: EffectivePermission | null = null;
   /** You approved a plan (ExitPlanMode): Claude Code leaves plan mode inside the process, without reporting it. */
   planApproved = false;
+  /** Fast mode was chosen but the running process did not turn it on: said once at the next turn. */
+  private speedNote: NoticeText | null = null;
   /**
    * A process that was force-killed after an unconfirmed interrupt but has not been seen to exit. While it may
    * still be running (and editing files), no new turn is dispatched for this member.
@@ -728,6 +786,14 @@ class ClaudeSession implements AgentSession {
             ),
       );
     }
+    // Fast mode the CLI did not turn on runs at standard speed (as Claude Code itself falls back when usage credits run
+    // out): slower and not billed to usage credits, so the turn goes ahead and the next one says so.
+    this.speedNote =
+      config.speed && config.speed !== STANDARD_SPEED && init?.fast_mode_state !== 'on'
+        ? L('Claude Code 这次没有开启快速模式（{why}），本回合以标准速度运行', 'Claude Code did not turn fast mode on this time ({why}); this turn runs at standard speed', {
+            why: claudeFastSpeed(init)?.reason ?? (typeof init?.fast_mode_disabled_reason === 'string' ? init.fast_mode_disabled_reason : L('未报告', 'not reported')),
+          })
+        : null;
     this.permission = permission;
     this.planApproved = false;
     this.procConfig = config;
@@ -826,6 +892,7 @@ class ClaudeSession implements AgentSession {
         model: input.config.model ?? null,
         effort: input.config.effort ?? null,
         permissionMode: input.config.permissionMode ?? null,
+        ...(input.config.speed ? { speed: input.config.speed } : {}),
         ...(input.config.chrome ? { chrome: true } : {}),
       };
     }
@@ -872,6 +939,10 @@ class ClaudeSession implements AgentSession {
       sink(noticeEvent(N('claude.restarted', { how: N(this.persisted ? 'word.resume' : 'word.create'), id: this.nativeSessionId })));
       if (this.current) sink({ type: 'config.effective', effective: this.current });
       if (this.permission) sink({ type: 'permission.effective', permission: this.permission });
+    }
+    if (this.speedNote) {
+      sink(noticeEvent(this.speedNote));
+      this.speedNote = null;
     }
     const turn = new ClaudeTurn(this, this.proc!, sink, signal);
     this.turn = turn;

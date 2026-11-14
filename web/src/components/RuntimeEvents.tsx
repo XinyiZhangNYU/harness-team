@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type { ActivityKind, AgentWithStatus, ApprovalAnswers, ApprovalAnswerValue, ApprovalDecision, ApprovalField, ApprovalForm, Message, SessionChoiceOption } from '../../../shared/protocol.ts';
 import { api } from '../api.ts';
+import { fromLocalInput, toLocalInput } from '../date-time.ts';
 import { readableCommand } from '../format.ts';
 import { localizeApprovalDetail, localizeDetail } from '../../../shared/notices.ts';
 import { usePrefs, useT, type TFunc, useNoticeText } from '../i18n.tsx';
@@ -254,6 +255,8 @@ const INPUT_TYPE = { email: 'email', uri: 'url', date: 'date', 'date-time': 'dat
 /** One field of a native form (questions from Codex / Claude Code, or an MCP server's form). */
 function FormField({ field: f, value, disabled, onChange }: { field: ApprovalField; value: ApprovalAnswerValue | undefined; disabled: boolean; onChange: (v: ApprovalAnswerValue) => void }) {
   const t = useT();
+  // The radio group of this field only: field ids repeat across cards (every question form starts at q0).
+  const name = useId();
   const head = (
     <>
       {'header' in f && f.header && <span className="approval-field-header">{f.header}</span>}
@@ -280,7 +283,6 @@ function FormField({ field: f, value, disabled, onChange }: { field: ApprovalFie
       const sel = on ? [...cur.selected.filter((x) => x !== v), v] : cur.selected.filter((x) => x !== v);
       onChange(otherOn ? { selected: sel, other: cur.other } : { selected: sel });
     };
-    const name = `f-${f.id}`;
     return (
       <fieldset className="approval-field">
         <legend>{head}</legend>
@@ -338,16 +340,18 @@ function FormField({ field: f, value, disabled, onChange }: { field: ApprovalFie
       </label>
     );
   }
+  // The control shows local time; the answer is a point in time with its offset (what `date-time` means).
+  const dateTime = f.format === 'date-time';
   return (
     <label className="approval-field">
       {head}
       <input
         type={f.secret ? 'password' : f.format ? INPUT_TYPE[f.format] : 'text'}
-        value={typeof value === 'string' ? value : ''}
+        value={typeof value === 'string' ? (dateTime ? toLocalInput(value) : value) : ''}
         maxLength={f.maxLength ?? undefined}
         autoComplete="off"
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => onChange(dateTime ? fromLocalInput(e.target.value) : e.target.value)}
       />
     </label>
   );

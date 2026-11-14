@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { pendingApprovals, useAttention, useDesktopNotifications } from './attention.ts';
 import { api, ApiError, connectEvents } from './api.ts';
 import { initialState, reducer } from './state.ts';
-import type { DeliveryInfo, Task } from '../../shared/protocol.ts';
+import type { DeliveryInfo, ScheduledTask, Task } from '../../shared/protocol.ts';
 import { groupRooms, Sidebar } from './components/Sidebar.tsx';
 import { ChatView } from './components/ChatView.tsx';
 import { MembersPanel } from './components/MembersPanel.tsx';
 import { TasksPanel } from './components/TasksPanel.tsx';
+import { SchedulesPanel } from './components/SchedulesPanel.tsx';
 import { SettingsDialog } from './components/SettingsDialog.tsx';
 import { UsageDialog } from './components/UsageDialog.tsx';
 import { usePrefs } from './i18n.tsx';
@@ -77,6 +78,7 @@ function useCollapsedPanels(): [Collapsed, (which: keyof Collapsed, collapsed: b
 
 const NO_DELIVERIES: DeliveryInfo[] = [];
 const NO_TASKS: Task[] = [];
+const NO_SCHEDULES: ScheduledTask[] = [];
 /** The task board is on hold until it becomes a model-maintained board (docs/DETAILED_DESIGN.md §12). */
 const SHOW_TASK_BOARD = false;
 
@@ -361,6 +363,13 @@ export function App() {
             runtimes={state.runtimes}
             openMember={openMember}
             addMember={addMember}
+            onError={report}
+          />
+          <SchedulesPanel
+            roomId={room.id}
+            schedules={state.schedules[room.id] ?? NO_SCHEDULES}
+            members={members}
+            agents={state.agents}
             onError={report}
           />
           {SHOW_TASK_BOARD && (

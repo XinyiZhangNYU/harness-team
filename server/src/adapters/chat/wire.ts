@@ -60,6 +60,8 @@ export interface CallSpec {
   key: string | null;
   /** The member's reasoning tag (null = send nothing about reasoning). */
   level: string | null;
+  /** The member's speed, one of the model's speeds (null = standard: nothing is sent). */
+  speed: string | null;
   /** Stable hash of member and chat ("{session}" in extra body / headers). */
   session: string;
   system: string;
@@ -104,6 +106,8 @@ export interface AssistantAnswer {
   stopDetail: string | null;
   usage: Usage | null;
   webSearches: number;
+  /** The service tier / speed the API says it used (OpenAI and xAI service_tier, Anthropic usage.speed, Gemini header). */
+  tier?: string | null;
 }
 
 export interface StreamHooks {
@@ -241,6 +245,10 @@ export function finishBody(body: Record<string, Json>, spec: CallSpec): Record<s
   const m = spec.model;
   if (spec.level !== null && m.reasoningLevels.includes(spec.level)) {
     const frag = mappingFor(m.reasoningMapping, m.reasoningLevels, spec.level);
+    if (frag) mergeInto(body, frag);
+  }
+  if (spec.speed !== null && m.speeds.includes(spec.speed)) {
+    const frag = mappingFor(m.speedMapping, m.speeds, spec.speed, '{speed}');
     if (frag) mergeInto(body, frag);
   }
   const extra = extraBodyFor(m.extraBody, spec.session);

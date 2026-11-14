@@ -41,7 +41,7 @@ import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.13.0';
+export const SERVER_VERSION = '0.14.0';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -154,6 +154,7 @@ const CreateAgent = z.object({
   worktree: z.boolean().optional(),
   model: z.string().max(200).nullable().optional(),
   effort: z.string().max(40).nullable().optional(),
+  speed: z.string().max(40).nullable().optional(),
   permissionMode: PermissionModeSchema.nullable().optional(),
   acknowledgePermissionRisk: z.string().max(100).optional(),
   collabMode: z.enum(['restricted', 'full']).optional(),
@@ -163,12 +164,13 @@ const CreateAgent = z.object({
   providerId: z.string().max(100).nullable().optional(),
   chat: z.lazy(() => ChatMemberSchema).optional(),
 });
-/** Only display name / model / effort / permission mode / avatar / language / Claude in Chrome are editable. Strict: handle, runtime or workspace in the body is refused. */
+/** Only display name / model / effort / speed / permission mode / avatar / language / Claude in Chrome are editable. Strict: handle, runtime or workspace in the body is refused. */
 const UpdateAgent = z
   .object({
     displayName: z.string().max(200).optional(),
     model: z.string().max(200).nullable().optional(),
     effort: z.string().max(40).nullable().optional(),
+    speed: z.string().max(40).nullable().optional(),
     permissionMode: PermissionModeSchema.nullable().optional(),
     acknowledgePermissionRisk: z.string().max(100).optional(),
     avatar: z.string().max(AGENT_AVATAR_MAX).regex(AGENT_AVATAR_RE).nullable().optional(),
@@ -241,6 +243,27 @@ const UpdateTask = z.object({
   status: z.enum(['todo', 'doing', 'done']).optional(),
   assigneeId: z.string().nullable().optional(),
 });
+
+const ScheduleRepeatSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('once'), at: z.string().max(40) }),
+  z.object({ kind: z.literal('daily'), time: z.string().max(5) }),
+  z.object({ kind: z.literal('weekly'), time: z.string().max(5), days: z.array(z.number().int()).max(7) }),
+  z.object({ kind: z.literal('interval'), minutes: z.number().int() }),
+]);
+const CreateSchedule = z.object({
+  agentIds: z.array(z.string().max(100)).min(1).max(1000).nullable(),
+  prompt: z.string().max(20000),
+  repeat: ScheduleRepeatSchema,
+  enabled: z.boolean().optional(),
+});
+const UpdateSchedule = z.object({
+  agentIds: z.array(z.string().max(100)).min(1).max(1000).nullable().optional(),
+  prompt: z.string().max(20000).optional(),
+  repeat: ScheduleRepeatSchema.optional(),
+  enabled: z.boolean().optional(),
+  revision: z.number().int().optional(),
+});
+const RunSchedule = z.object({ revision: z.number().int().optional() });
 
 class HttpError extends Error {
   readonly status: number;
@@ -504,6 +527,15 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       const body = UpdateTask.parse(await readJson(req));
       return sendJson(res, 200, { task: core.updateTask(taskId, body, 'user', b) });
     }
+    if (a === 'rooms' && b && c === 'schedules') {
+      if (!d && method === 'POST') return sendJson(res, 201, { schedule: core.createSchedule(b, CreateSchedule.parse(await readJson(req))) });
+      if (d && parts.length === 4 && method === 'POST') return sendJson(res, 200, { schedule: core.updateSchedule(b, d, UpdateSchedule.parse(await readJson(req))) });
+      if (d && parts.length === 4 && method === 'DELETE') {
+        core.deleteSchedule(b, d);
+        return sendJson(res, 200, { ok: true });
+      }
+      if (d && e === 'run' && parts.length === 5 && method === 'POST') return sendJson(res, 200, { schedule: core.runScheduleNow(b, d, RunSchedule.parse(await readJson(req)).revision) });
+    }
     if (a === 'rooms' && b && c === 'members' && !d && method === 'POST') {
       const body = AddMember.parse(await readJson(req));
       core.addMember(b, body.agentId, body.defaultReply === true);
@@ -645,11 +677,15 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       }
       if (id && sub === 'models' && modelId && e === 'test' && parts.length === 5 && method === 'POST') {
         // A billed request: only with an explicit confirmation from the user.
-        if (ConfirmBody.parse(await readJson(req)).confirm !== true) throw new HttpError(400, 'confirm required');
+        const body = ConfirmBody.parse(await readJson(req));
+        if (body.confirm !== true) throw new HttpError(400, 'confirm required');
         const p = chatProviders.get(id);
         const m = p?.models.find((x) => x.id === modelId);
         if (!p || !m) throw new HttpError(404, 'model not found');
-        return sendJson(res, 200, await testModel(p, m, await chatProviders.key(id)));
+        // Optionally at one of the model's speeds: the answer says which tier the API used.
+        const speed = typeof body.speed === 'string' ? body.speed : null;
+        if (speed !== null && !m.speeds.includes(speed)) throw new HttpError(400, 'unknown speed');
+        return sendJson(res, 200, await testModel(p, m, await chatProviders.key(id), speed));
       }
     }
     if (a === 'avatar-defaults' && !b && method === 'GET') return sendJson(res, 200, { defaults: core.avatarDefaults() });

@@ -59,6 +59,16 @@ export function extractCitations(body: string): { text: string; citations: FileC
   return { text, citations };
 }
 
+/** The body as plain text for copying: each citation becomes its path, with `:line` or `:start-end`. */
+export function citationsAsText(body: string): string {
+  if (!body.includes('codex-file-citation')) return body;
+  return body.replace(SCAN, (whole: string, _nl: string | undefined, fence: string | undefined, attrs: string | undefined) => {
+    if (fence || attrs === undefined) return whole;
+    const c = parseCitationAttrs(attrs);
+    return c ? c.path + (c.start == null ? '' : c.end == null ? `:${c.start}` : `:${c.start}-${c.end}`) : whole;
+  });
+}
+
 /** Absolute path for the desktop shell: a relative citation is taken from the member's workspace. */
 export function citationPath(path: string, workspace: string | null | undefined): string | null {
   if (/^[A-Za-z]:[\\/]/.test(path) || (path.startsWith('/') && !path.startsWith('//'))) return path;

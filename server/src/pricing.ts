@@ -126,6 +126,33 @@ const TABLES: Record<string, Record<string, Period[]>[]> = {
 };
 
 /**
+ * Price multiplier of a faster tier, by vendor (checked 2026-11-13): OpenAI fast (formerly priority) 2x and ultrafast
+ * 6x of every token rate; Anthropic fast mode 2x (Opus 5.5 $8/$40, Fable 5.2 $16/$80); Gemini API priority 1.8x
+ * (every listed model: e.g. Gemini 4 Argon $3.60/$18.00 against $2/$10). Tiers not listed here have no known price.
+ */
+const SPEED_FACTOR = new Map<Record<string, Period[]>, Record<string, number>>([
+  [OPENAI, { fast: 2, priority: 2, ultrafast: 6 }],
+  [ANTHROPIC, { fast: 2 }],
+  [GEMINI, { priority: 1.8 }],
+]);
+
+/** Tier names the APIs answer with for the standard speed (OpenAI "default", Anthropic and Gemini "standard"). */
+export const STANDARD_TIERS: ReadonlySet<string> = new Set(['default', 'standard', 'auto']);
+
+/**
+ * What a tier multiplies a model's standard rate by: 1 for the standard speed (null tier included), null when the tier
+ * of this model has no known price (a provider the tables do not have, or a tier they do not list).
+ */
+export function speedFactor(runtimeKind: string, model: string, tier: string | null): number | null {
+  if (!tier || STANDARD_TIERS.has(tier)) return 1;
+  const key = priceModelKey(runtimeKind, model);
+  for (const table of TABLES[runtimeKind] ?? []) {
+    if (table[key]) return SPEED_FACTOR.get(table)?.[tier] ?? null;
+  }
+  return null;
+}
+
+/**
  * The table key for a model id as the runtime names it. Antigravity folds the Thinking level or mode into some ids
  * ("gemini-3.8-flash-high", "claude-opus-4-6-thinking"); the price does not depend on it.
  */

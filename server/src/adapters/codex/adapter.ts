@@ -20,6 +20,8 @@ import {
   type RuntimeDescriptor,
   type RuntimeModelCatalog,
   type RuntimeModelOption,
+  type RuntimeSpeedOption,
+  STANDARD_SPEED,
   type FileChange,
 } from '../../../../shared/protocol.ts';
 import { L, type Localized, N, NoticeError, type NoticeText, zhText } from '../../../../shared/notices.ts';
@@ -52,7 +54,7 @@ import {
   REQUEST_INTERRUPTED,
   unsupportedDecision,
 } from '../types.ts';
-import { JsonRpcProcess, type RpcId } from './rpc.ts';
+import { JsonRpcProcess, type RpcId, RpcError } from './rpc.ts';
 import { choiceTexts, elicitationContent, fieldsFromSchema } from '../forms.ts';
 
 /**
@@ -789,6 +791,7 @@ export class CodexAdapter implements RuntimeAdapter {
               .filter(Boolean),
             defaultEffort: typeof m.defaultReasoningEffort === 'string' ? m.defaultReasoningEffort : null,
             isDefault: !!m.isDefault,
+            speeds: codexSpeeds(m.serviceTiers),
           });
         }
         cursor = typeof res?.nextCursor === 'string' && res.nextCursor ? res.nextCursor : null;
@@ -830,6 +833,7 @@ export class CodexAdapter implements RuntimeAdapter {
           // Replacing an unknown model, it is sent explicitly, so the effort must be one that model takes.
           effort: unknownModel && entry ? codexImplicitEffort(entry, cfgEffort) : (cfgEffort ?? entry?.defaultEffort ?? null),
           efforts: entry?.efforts ?? [],
+          speeds: entry?.speeds ?? [],
           note: note ?? (cfgModel ? L('来自你的 Codex 配置（config.toml）', 'From your Codex configuration (config.toml)') : L('来自 Codex model/list 标记的默认模型', 'The default model marked by Codex model/list')),
         },
         ...(permissionModes ? { permissionModes } : {}),
@@ -844,6 +848,18 @@ export class CodexAdapter implements RuntimeAdapter {
     this.conn = null;
     if (c) await c.close();
   }
+}
+
+/** The service tiers model/list offers this account for a model (e.g. "priority" = Fast; "ultrafast" only on the plans
+ *  that have it). The standard tier is not listed: it is always available. */
+export function codexSpeeds(tiers: unknown): RuntimeSpeedOption[] {
+  const out: RuntimeSpeedOption[] = [];
+  for (const t of Array.isArray(tiers) ? tiers : []) {
+    const id = typeof t?.id === 'string' ? t.id : '';
+    if (!id || id === 'default' || id === STANDARD_SPEED || out.some((o) => o.id === id)) continue;
+    out.push({ id, name: typeof t.name === 'string' && t.name ? t.name : id, description: typeof t.description === 'string' && t.description ? t.description : null, available: true });
+  }
+  return out;
 }
 
 /** thread/start or exact thread/resume. Refuses to continue unless the runtime confirms the human reviewer. */
@@ -1114,6 +1130,30 @@ export async function turnOverrides(
   return { model, ...(effort ? { effort } : {}) };
 }
 
+/** The serviceTierForTurn value for a member's speed: null = nothing sent (Codex uses the thread's own tier, i.e. the
+ *  user's config.toml), "default" for standard, else a tier model/list still offers for the model this turn uses.
+ *  Throws (no message sent) rather than run at another speed. */
+export async function turnServiceTier(adapter: CodexAdapter, cwd: string, speed: string | null, model: string | null): Promise<string | null> {
+  if (!speed) return null;
+  if (speed === STANDARD_SPEED) return 'default';
+  const cat = await adapter.listModels({ cwd });
+  if (!cat.available) {
+    throw new NoticeError(L('无法确认所选速度是否可用：{error}；本消息未发送', 'Cannot confirm that the chosen speed is available: {error}; this message was not sent', { error: cat.error }));
+  }
+  const id = model ?? cat.nativeDefault?.model ?? null;
+  const speeds = (id ? cat.models.find((m) => m.id === id)?.speeds : null) ?? cat.nativeDefault?.speeds ?? [];
+  if (!speeds.some((s) => s.id === speed && s.available)) {
+    throw new NoticeError(
+      L('Codex 没有为模型 {model} 提供速度 {speed}（可选：{options}）；本消息未发送，请在成员设置中重新选择', 'Codex does not offer the speed {speed} for the model {model} (available: {options}); this message was not sent. Choose again in the member settings.', {
+        model: id ?? '?',
+        speed,
+        options: speeds.length ? speeds.map((s) => s.name).join(', ') : L('仅标准', 'standard only'),
+      }),
+    );
+  }
+  return speed;
+}
+
 function describeThread(res: any, resumed: boolean): NoticeText[] {
   const sb = res.sandbox ?? {};
   const sandbox =
@@ -1227,9 +1267,11 @@ class CodexSession implements AgentSession {
         skill = { name: input.command.name, path };
       }
       let overrides: { model?: string; effort?: string; note?: NoticeText } = {};
+      let serviceTier: string | null = null;
       if (!command) {
         try {
           overrides = await turnOverrides(this.adapter, this.cwd, input.config, this.current);
+          serviceTier = await turnServiceTier(this.adapter, this.cwd, input.config?.speed ?? null, overrides.model ?? this.current?.model ?? null);
         } catch (e) {
           return { status: 'failed', error: (e as Error).message };
         }
@@ -1242,6 +1284,7 @@ class CodexSession implements AgentSession {
       const turn = new TurnRun(this.conn, this.nativeSessionId, sink, signal, this.interruptTimeoutMs, {
         requested,
         explicit: !!(input.config && (input.config.model || input.config.effort)),
+        serviceTier,
         onSettings: (e) => {
           this.current = e;
           sink({ type: 'config.effective', effective: e });
@@ -1360,6 +1403,8 @@ interface TurnSettingsHooks {
   /** Sandbox / approval policy turn/start carries (null = nothing; Codex keeps the thread's own). */
   permission?: { approvalPolicy: unknown; sandboxPolicy: unknown; approvalsReviewer: CodexReviewer } | null;
   onPermission?(sandbox: unknown, approvalPolicy: unknown, source: Localized, reviewer?: unknown): void;
+  /** The service tier for this turn only (serviceTierForTurn; "default" = standard). Omitted: the thread's own tier. */
+  serviceTier?: string | null;
 }
 
 /** Codex TokenUsageBreakdown (thread/tokenUsage/updated). inputTokens includes cachedInputTokens. */
@@ -1501,6 +1546,8 @@ class TurnRun {
             // Official per-turn override ("for this turn and subsequent turns"); omitted = Codex keeps its own settings.
             ...(overrides?.model ? { model: overrides.model } : {}),
             ...(overrides?.effort ? { effort: overrides.effort } : {}),
+            // Official per-turn tier: does not change the thread's own tier, so a member back on "follow" sends nothing.
+            ...(this.settings?.serviceTier ? { serviceTierForTurn: this.settings.serviceTier } : {}),
             ...(this.settings?.permission
               ? {
                   approvalPolicy: this.settings.permission.approvalPolicy,
@@ -1633,7 +1680,7 @@ class TurnRun {
   async steer(input: SteerInput): Promise<SteerAnswer> {
     if (this.command) return { ok: false, error: L('Codex 的命令回合不接受插话', 'A Codex command turn takes no added message') };
     const turnId = this.turnId ?? (await new Promise<string | null>((r) => this.turnIdWaiters.push(r)));
-    if (this.finished || !turnId || this.signal.aborted) return { ok: false, error: NO_TURN };
+    if (this.finished || !turnId || this.signal.aborted || !this.conn.rpc.running) return { ok: false, error: NO_TURN };
     try {
       await this.conn.rpc.request(
         'turn/steer',
@@ -1649,7 +1696,9 @@ class TurnRun {
       );
       return { ok: true };
     } catch (e) {
-      return { ok: false, error: L('turn/steer 失败：{error}', 'turn/steer failed: {error}', { error: (e as Error).message }) };
+      const error = L('turn/steer 失败：{error}', 'turn/steer failed: {error}', { error: (e as Error).message });
+      // An error answer is Codex refusing it; no answer (timed out, the app-server gone) leaves open whether it took it.
+      return e instanceof RpcError && e.code !== undefined ? { ok: false, error } : { ok: false, error, unknown: true };
     }
   }
 

@@ -108,6 +108,7 @@ const T = {
   'perm.accept-edits': { zh: '自动接受编辑（accept-edits）', en: 'Accept edits (accept-edits)' },
   'perm.kimi.default': { zh: '默认，每次确认（default）', en: 'Default, ask every time (default)' },
   'perm.kimi.auto': { zh: '自动批准安全操作（auto）', en: 'Auto-approve safe actions (auto)' },
+  'perm.antigravity.auto': { zh: '自动批准安全操作（auto）', en: 'Auto-approve safe actions (auto)' },
   'perm.copilot.agent': { zh: 'Agent，工具每次确认（agent）', en: 'Agent, ask before tools (agent)' },
   'perm.copilot.plan': { zh: '先规划（plan）', en: 'Plan first (plan)' },
   'perm.autopilot': { zh: 'Autopilot，全部自动批准（autopilot）', en: 'Autopilot, approve everything (autopilot)' },

@@ -247,6 +247,8 @@ export class ChatProviders {
     const effective = { ...m.recommended, ...manual };
     const problem = mappingProblem(effective.reasoningMapping, effective.reasoningLevels);
     if (problem) throw new ChatConfigError(400, L('推理参数映射：{p}', 'Reasoning mapping: {p}', { p: problem }));
+    const speedProblem = mappingProblem(effective.speedMapping, effective.speeds, '{speed}');
+    if (speedProblem) throw new ChatConfigError(400, L('速度参数映射：{p}', 'Speed mapping: {p}', { p: speedProblem }));
     this.db
       .prepare('UPDATE provider_models SET enabled = ?, config_json = ? WHERE provider_id = ? AND model_id = ?')
       .run(effective.enabled ? 1 : 0, JSON.stringify({ ...cfg, fields: manual }), providerId, modelId);
@@ -355,13 +357,17 @@ function checkField(key: keyof ChatModelFields, v: unknown): unknown {
     case 'compactAt':
       if (typeof v !== 'number' || !(v >= 0.3 && v <= 0.95)) throw bad();
       return v;
-    case 'reasoningLevels': {
+    case 'reasoningLevels':
+    case 'speeds': {
       if (!Array.isArray(v) || v.length > 12) throw bad();
       const tags = v.map((x) => (typeof x === 'string' ? x.trim() : ''));
       if (tags.some((t) => !/^[\w.-]{1,40}$/.test(t)) || new Set(tags).size !== tags.length) throw bad();
+      // "standard" means "no faster tier" in member settings, so it cannot name one.
+      if (key === 'speeds' && tags.includes('standard')) throw bad();
       return tags;
     }
     case 'reasoningMapping':
+    case 'speedMapping':
     case 'extraBody':
     case 'extraHeaders': {
       if (typeof v !== 'string' || v.length > 20_000) throw bad();

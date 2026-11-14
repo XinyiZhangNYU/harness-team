@@ -70,6 +70,8 @@ export const CONSERVATIVE_MODEL: Omit<ChatModelFields, 'displayName'> = {
   webSearch: false,
   reasoningLevels: [],
   reasoningMapping: '',
+  speeds: [],
+  speedMapping: '',
   extraBody: '',
   extraHeaders: '',
   explicitCache: false,
@@ -97,28 +99,42 @@ const DEEPSEEK_ANTHROPIC_MAPPING = json({
 });
 const GEMINI_MAPPING = json({ generationConfig: { thinkingConfig: { thinkingLevel: '{level}', includeThoughts: true } } });
 const OFF_ON_THINKING = json({ off: { thinking: { type: 'disabled' } }, on: { thinking: { type: 'enabled' } } });
+/**
+ * Faster tiers (checked 2026-11-13). OpenAI: service_tier "fast" (formerly "priority") on Responses and Chat
+ * Completions, "ultrafast" on Responses for gpt-6-astra and gpt-6.1-sol only. Anthropic: speed "fast" on Opus 5.5 and
+ * Fable 5.2 (no beta header). Gemini API (not Vertex AI): service_tier "priority", Tier 2 / 3 billing accounts only.
+ * Whether an account may use a tier is only known from the answer (see UsageTally / tierNotice in adapter.ts).
+ */
+const SERVICE_TIER = json({ service_tier: '{speed}' });
+const ANTHROPIC_SPEED = json({ speed: '{speed}' });
 
 const KNOWN: Known[] = [
   // OpenAI: 1.05M context, but above 272K input is billed at double rate (user, 2026-11-10), so 272K is recommended.
   {
     ids: ['gpt-6-astra', 'gpt-6.1-sol'],
     formats: ['openai_responses'],
-    fields: { contextTokens: 272_000, maxOutputTokens: 128_000, image: true, pdf: true, webSearch: true, reasoningLevels: UP_TO_MAX, reasoningMapping: json({ reasoning: { effort: '{level}', summary: 'auto' } }), extraBody: json({ prompt_cache_key: '{session}' }) },
+    fields: { contextTokens: 272_000, maxOutputTokens: 128_000, image: true, pdf: true, webSearch: true, reasoningLevels: UP_TO_MAX, reasoningMapping: json({ reasoning: { effort: '{level}', summary: 'auto' } }), speeds: ['fast', 'ultrafast'], speedMapping: SERVICE_TIER, extraBody: json({ prompt_cache_key: '{session}' }) },
   },
   {
     ids: ['gpt-6.1-terra', 'gpt-6-luna'],
     formats: ['openai_responses'],
-    fields: { contextTokens: 272_000, maxOutputTokens: 128_000, image: true, pdf: true, webSearch: true, reasoningLevels: ['none', ...UP_TO_MAX], reasoningMapping: json({ reasoning: { effort: '{level}', summary: 'auto' } }), extraBody: json({ prompt_cache_key: '{session}' }) },
+    fields: { contextTokens: 272_000, maxOutputTokens: 128_000, image: true, pdf: true, webSearch: true, reasoningLevels: ['none', ...UP_TO_MAX], reasoningMapping: json({ reasoning: { effort: '{level}', summary: 'auto' } }), speeds: ['fast'], speedMapping: SERVICE_TIER, extraBody: json({ prompt_cache_key: '{session}' }) },
   },
   // In Chat Completions these models cannot call tools (only through Responses).
   {
     ids: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra'],
     formats: ['openai_chat'],
     hosts: ['api.openai.com'],
-    fields: { contextTokens: 272_000, maxOutputTokens: 128_000, image: true, tools: false, reasoningLevels: UP_TO_MAX, reasoningMapping: json({ reasoning_effort: '{level}' }), extraBody: json({ prompt_cache_key: '{session}' }) },
+    fields: { contextTokens: 272_000, maxOutputTokens: 128_000, image: true, tools: false, reasoningLevels: UP_TO_MAX, reasoningMapping: json({ reasoning_effort: '{level}' }), speeds: ['fast'], speedMapping: SERVICE_TIER, extraBody: json({ prompt_cache_key: '{session}' }) },
   },
   {
-    ids: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2', 'claude-fable-5-1'],
+    ids: ['claude-opus-5-5', 'claude-fable-5-2'],
+    formats: ['anthropic'],
+    hosts: ['api.anthropic.com'],
+    fields: { contextTokens: 1_000_000, maxOutputTokens: 128_000, image: true, pdf: true, reasoningLevels: UP_TO_MAX, reasoningMapping: ANTHROPIC_MAPPING, speeds: ['fast'], speedMapping: ANTHROPIC_SPEED, explicitCache: true },
+  },
+  {
+    ids: ['claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'],
     formats: ['anthropic'],
     hosts: ['api.anthropic.com'],
     fields: { contextTokens: 1_000_000, maxOutputTokens: 128_000, image: true, pdf: true, reasoningLevels: UP_TO_MAX, reasoningMapping: ANTHROPIC_MAPPING, explicitCache: true },
@@ -170,6 +186,19 @@ const KNOWN: Known[] = [
   },
   // Thinking levels per Google's thinking guide (aistudio.google.com/docs/thinking): only 3 Flash Preview takes
   // `minimal`. 3.1 Flash-Lite is not listed there; it keeps the levels of the other Flash models.
+  // Priority inference is offered on the Gemini API only (Vertex AI not checked): listed before the general rows.
+  {
+    ids: ['gemini-4-argon', 'gemini-4-carbon', 'gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
+    formats: ['gemini'],
+    hosts: ['generativelanguage.googleapis.com'],
+    fields: { contextTokens: 1_048_576, maxOutputTokens: 65_536, image: true, pdf: true, webSearch: true, reasoningLevels: ['low', 'medium', 'high'], reasoningMapping: GEMINI_MAPPING, speeds: ['priority'], speedMapping: SERVICE_TIER },
+  },
+  {
+    ids: ['gemini-3-flash-preview'],
+    formats: ['gemini'],
+    hosts: ['generativelanguage.googleapis.com'],
+    fields: { contextTokens: 1_048_576, maxOutputTokens: 65_536, image: true, pdf: true, webSearch: true, reasoningLevels: ['minimal', 'low', 'medium', 'high'], reasoningMapping: GEMINI_MAPPING, speeds: ['priority'], speedMapping: SERVICE_TIER },
+  },
   {
     ids: ['gemini-4-argon', 'gemini-4-carbon', 'gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
     formats: ['gemini'],

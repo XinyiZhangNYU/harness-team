@@ -140,7 +140,10 @@ async function once(
       })();
     }
     try {
-      return await format.parse(events, hooks);
+      const answer = await format.parse(events, hooks);
+      // Gemini reports the tier it used (priority / standard) only in a response header.
+      const tier = res.headers.get('x-gemini-service-tier');
+      return answer.tier || !tier ? answer : { ...answer, tier };
     } catch (e) {
       if (opts.signal?.aborted) throw opts.signal.reason;
       if (ctrl.signal.reason === IDLE) throw idleError();
@@ -224,14 +227,15 @@ async function sendCheck(c: CheckRequest): Promise<unknown> {
 }
 
 /** One short message to the model (billed by the provider; the API asks for confirmation first). */
-export async function testModel(provider: ChatProvider, model: ChatModel, key: string | null, signal?: AbortSignal): Promise<ChatModelTest> {
-  if (!key) return { ok: false, text: '', usage: null, error: NO_KEY };
+export async function testModel(provider: ChatProvider, model: ChatModel, key: string | null, speed: string | null = null, signal?: AbortSignal): Promise<ChatModelTest> {
+  if (!key) return { ok: false, text: '', usage: null, tier: null, error: NO_KEY };
   const spec: CallSpec = {
     provider,
     model,
     key,
     // The lowest reasoning tag keeps the test cheap.
     level: model.reasoningLevels[0] ?? null,
+    speed,
     session: 'connection-test',
     system: '',
     items: [{ role: 'user', parts: [{ type: 'text', text: 'Reply with the single word OK.' }] }],
@@ -247,9 +251,10 @@ export async function testModel(provider: ChatProvider, model: ChatModel, key: s
       ok,
       text: (a.text || text).slice(0, 200),
       usage: a.usage,
+      tier: a.tier ?? null,
       error: ok ? null : L('模型没有正常结束：{m}', 'The model did not finish normally: {m}', { m: a.stopDetail ?? a.stop }),
     };
   } catch (e) {
-    return { ok: false, text: text.slice(0, 200), usage: null, error: httpNotice(e, provider) };
+    return { ok: false, text: text.slice(0, 200), usage: null, tier: null, error: httpNotice(e, provider) };
   }
 }

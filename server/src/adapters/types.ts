@@ -152,6 +152,8 @@ export interface ModelConfig {
   permissionMode?: PermissionMode | null;
   /** Claude Code only: start with `--chrome` (Claude in Chrome). Absent = off. */
   chrome?: boolean;
+  /** Codex service tier / Claude Code fast mode (Agent.speed); null/absent = the runtime's own configuration. */
+  speed?: string | null;
 }
 
 /** The permission mode the runtime itself reported (AgentPermissionReport without the timestamp). */
@@ -197,7 +199,7 @@ export interface AgentSession {
   /**
    * Adds a message from the local user to the turn that is running now (capabilities.steer). Resolves `ok` once the
    * runtime took it into that turn; otherwise (no turn running, the turn ends first, or the runtime refused) nothing
-   * was sent and the Core queues the message for the next turn.
+   * was sent and the Core queues the message for the next turn, unless the answer is `unknown`.
    */
   steer?(input: SteerInput): Promise<SteerAnswer>;
   /**
@@ -216,7 +218,8 @@ export interface SteerInput {
   attachments?: TurnAttachment[];
 }
 
-export type SteerAnswer = { ok: true } | { ok: false; error: Localized };
+/** `unknown`: it was sent, but whether the turn took it is not known (no answer in time): it is never sent again. */
+export type SteerAnswer = { ok: true } | { ok: false; error: Localized; unknown?: true };
 
 export type ApprovalAnswer ={ ok: true; nativeDecision: string } | { ok: false; error: Localized };
 
@@ -366,4 +369,6 @@ export interface TurnUsage {
   costUsd: number | null;
   /** The runtime reported a cost but no token counts for this record: its zeros are not counts. */
   tokensUnknown?: true;
+  /** No price is known for how it was served (a speed tier the price tables do not list): the list price does not apply. */
+  unpriced?: true;
 }

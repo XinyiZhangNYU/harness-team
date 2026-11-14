@@ -1,5 +1,8 @@
 import { isNotice, type NoticeText } from '../../shared/notices.ts';
 import type {
+  CreateScheduleRequest,
+  ScheduledTask,
+  UpdateScheduleRequest,
   SessionChoiceOption,
   UsageSummary,
   AgentCommands,
@@ -101,8 +104,8 @@ export const api = {
   /** Free: reads the provider's model list (no message is sent). */
   checkChatProvider: (id: string) => request<ChatConnectionCheck>('POST', `/api/chat-providers/${encodeURIComponent(id)}/check`, {}),
   /** Billed: one short test message. Only after the user confirmed it. */
-  testChatModel: (id: string, modelId: string) =>
-    request<ChatModelTest>('POST', `/api/chat-providers/${encodeURIComponent(id)}/models/${encodeURIComponent(modelId)}/test`, { confirm: true }),
+  testChatModel: (id: string, modelId: string, speed: string | null = null) =>
+    request<ChatModelTest>('POST', `/api/chat-providers/${encodeURIComponent(id)}/models/${encodeURIComponent(modelId)}/test`, { confirm: true, ...(speed ? { speed } : {}) }),
   avatarDefaults: () => request<{ defaults: AvatarDefaults }>('GET', '/api/avatar-defaults').then((r) => r.defaults),
   /** null removes the runtime's (or model provider's) default; the result also arrives as `avatar-defaults.updated`. */
   setAvatarDefault: (key: AvatarDefaultKey, avatar: string | null) =>
@@ -149,6 +152,13 @@ export const api = {
     request<{ task: Task }>('POST', `/api/rooms/${roomId}/tasks`, { title, assigneeId }).then((r) => r.task),
   updateTask: (roomId: string, taskId: number, patch: { status?: TaskStatus; assigneeId?: string | null; title?: string }) =>
     request<{ task: Task }>('POST', `/api/rooms/${roomId}/tasks/${taskId}`, patch).then((r) => r.task),
+  createSchedule: (roomId: string, body: CreateScheduleRequest) =>
+    request<{ schedule: ScheduledTask }>('POST', `/api/rooms/${roomId}/schedules`, body).then((r) => r.schedule),
+  updateSchedule: (roomId: string, id: string, patch: UpdateScheduleRequest) =>
+    request<{ schedule: ScheduledTask }>('POST', `/api/rooms/${roomId}/schedules/${id}`, patch).then((r) => r.schedule),
+  deleteSchedule: (roomId: string, id: string) => request<{ ok: boolean }>('DELETE', `/api/rooms/${roomId}/schedules/${id}`, {}),
+  runSchedule: (roomId: string, id: string, revision: number) =>
+    request<{ schedule: ScheduledTask }>('POST', `/api/rooms/${roomId}/schedules/${id}/run`, { revision }).then((r) => r.schedule),
   interrupt: (agentId: string) => request<{ requested: boolean }>('POST', `/api/agents/${agentId}/interrupt`, {}),
   interruptRoom: (roomId: string) => request<{ requested: number }>('POST', `/api/rooms/${roomId}/interrupt`, {}),
   decideApproval: (messageId: string, decision: ApprovalDecision, answers?: ApprovalAnswers) =>

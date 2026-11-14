@@ -55,11 +55,13 @@ interface Texts {
 const MCP_TOOLS = (lang: AgentLanguage) =>
   lang === 'zh'
     ? `你可以使用 ${TEAM_MCP_SERVER} MCP 工具：get_messages（查看群消息）、send_message（回合中途给成员发消息，可用 intent 标注 progress / blocked / help / review）、` +
-      'get_status（成员与队列状态）、list_tasks / create_task / update_task（todo / doing / done 任务板，用于认领和分工）。' +
+      'get_status（成员与队列状态）、list_tasks / create_task / update_task（todo / doing / done 任务板，用于认领和分工）、' +
+      'list_schedules / create_schedule / update_schedule / delete_schedule（定时任务，新建或修改后需用户开启才运行）。' +
       '回合结束时的回复会自动发到群里，不要再用 send_message 重复同一内容。'
     : `You can use the ${TEAM_MCP_SERVER} MCP tools: get_messages (see chat messages), send_message (message members in the middle ` +
       'of a turn; intent can mark it progress / blocked / help / review), get_status (members and queues), ' +
-      'list_tasks / create_task / update_task (todo / doing / done task board, for claiming and splitting work). ' +
+      'list_tasks / create_task / update_task (todo / doing / done task board, for claiming and splitting work), ' +
+      'list_schedules / create_schedule / update_schedule / delete_schedule (scheduled tasks; a new or edited one runs only after the user switches it on). ' +
       'Your reply at the end of the turn is posted to the chat automatically; do not repeat it with send_message.';
 
 const TEXTS: Record<AgentLanguage, Texts> = {
