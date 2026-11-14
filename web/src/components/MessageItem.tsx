@@ -1,12 +1,12 @@
 import { type ComponentProps, memo, useEffect, useMemo, useRef, useState } from 'react';
-import Markdown, { type Components } from 'react-markdown';
+import Markdown, { type Components, defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { noticeCode } from '../../../shared/notices.ts';
 import type { AgentWithStatus, DeliveryInfo, Message, MessageIntent } from '../../../shared/protocol.ts';
 import { initial } from '../avatar.ts';
 import { formatTime, fullTime, splitNotice } from '../format.ts';
 import { usePrefs, type TFunc, useNoticeText } from '../i18n.tsx';
-import { CITATION_HREF, citationsAsText, extractCitations } from '../file-citations.ts';
+import { CITATION_HREF, citationsAsText, extractCitations, localLinkPath } from '../file-citations.ts';
 import { AttachmentGrid, FileCitationChip } from './Attachments.tsx';
 import { DeliveryChips } from './DeliveryChips.tsx';
 import { Icon } from './Icon.tsx';
@@ -85,24 +85,31 @@ function CodeBlock({ node: _node, children, ...rest }: ComponentProps<'pre'> & {
 /** What message bodies render with: no images, copyable code blocks. */
 const BODY: Components = { ...NO_IMAGES, pre: CodeBlock };
 
-/** A message body; Codex file citations become file chips (file-citations.ts). */
-function MessageMarkdown({ body, workspace }: { body: string; workspace: string | null | undefined }) {
+/** Links to a local file keep their target (`C:/…` and `file:` would otherwise be dropped as unknown schemes). */
+const keepLocalLinks = (url: string) => (localLinkPath(url) ? url : defaultUrlTransform(url));
+
+/** A message body; Codex file citations, local paths in code spans and links to local files become file chips (file-citations.ts). */
+export function MessageMarkdown({ body, workspace }: { body: string; workspace: string | null | undefined }) {
   const { text, citations } = useMemo(() => extractCitations(body), [body]);
   const components = useMemo<Components>(
-    () =>
-      citations.length
-        ? {
-            ...BODY,
-            a: ({ href, children, node: _node, ...rest }) => {
-              const c = href?.startsWith(CITATION_HREF) ? citations[Number(href.slice(CITATION_HREF.length))] : undefined;
-              return c ? <FileCitationChip citation={c} workspace={workspace} /> : <a href={href} {...rest}>{children}</a>;
-            },
-          }
-        : BODY,
+    () => ({
+      ...BODY,
+      a: ({ href, children, node: _node, ...rest }) => {
+        const c = href?.startsWith(CITATION_HREF) ? citations[Number(href.slice(CITATION_HREF.length))] : undefined;
+        if (c) return <FileCitationChip citation={c} workspace={workspace} />;
+        const local = localLinkPath(href);
+        if (local) return <FileCitationChip citation={local} workspace={workspace} label={children} />;
+        return (
+          <a href={href} {...rest}>
+            {children}
+          </a>
+        );
+      },
+    }),
     [citations, workspace],
   );
   return (
-    <Markdown remarkPlugins={[remarkGfm]} components={components}>
+    <Markdown remarkPlugins={[remarkGfm]} components={components} urlTransform={keepLocalLinks}>
       {text}
     </Markdown>
   );
@@ -115,6 +122,10 @@ export const MessageItem = memo(function MessageItem(props: {
   agents?: Record<string, AgentWithStatus>;
   /** Runtime rows (tool activity, approvals): show the member's avatar in the gutter. */
   showAvatar?: boolean;
+  /** Takes back the user's queued message (`edit`: its text goes back to the composer). */
+  onWithdraw?: (message: Message, edit: boolean) => void;
+  /** The sender's working folder in this chat, when it is not its own (Room.memberWorkspaces). */
+  senderWorkspace?: string;
 }) {
   const { t, locale, userAvatar, userLabel } = usePrefs();
   const noticeText = useNoticeText();
@@ -124,7 +135,21 @@ export const MessageItem = memo(function MessageItem(props: {
       {formatTime(m.createdAt, locale)}
     </time>
   );
-  const chips = props.deliveries?.length ? <DeliveryChips deliveries={props.deliveries} agents={props.agents ?? {}} /> : null;
+  const onWithdraw = props.onWithdraw;
+  const chips = props.deliveries?.length ? (
+    <DeliveryChips
+      deliveries={props.deliveries}
+      agents={props.agents ?? {}}
+      onWithdraw={m.senderKind === 'user' && onWithdraw ? (edit) => onWithdraw(m, edit) : undefined}
+    />
+  ) : null;
+  if (m.meta?.type === 'withdrawn') {
+    return (
+      <div className="msg-system" data-seq={m.seq}>
+        {t('msg.withdrawn')} {time}
+      </div>
+    );
+  }
   const meta = m.meta?.type === 'chat' ? m.meta : null;
 
   const noticeMeta = m.meta?.type === 'notice' ? m.meta.notice : null;
@@ -189,7 +214,7 @@ export const MessageItem = memo(function MessageItem(props: {
           {body ? (
             // react-markdown does not render raw HTML by default. Images are not loaded at all: a same-origin URL would be
             // requested with the session cookie as soon as a member's reply shows (CSP only blocks remote ones).
-            <MessageMarkdown body={body} workspace={sender?.workspace} />
+            <MessageMarkdown body={body} workspace={props.senderWorkspace ?? sender?.workspace} />
           ) : (
             <span className="muted">…</span>
           )}

@@ -13,6 +13,8 @@ import type { Agent, AgentLanguage, AttachmentInfo, Message, Room } from '../../
  */
 
 export const TEAM_MCP_SERVER = 'harness_team';
+/** MCP server name of Harness Team's browser for runtime members (Agent.browser). */
+export const BROWSER_MCP_SERVER = 'harness_browser';
 
 interface Texts {
   trigger: string;
@@ -26,6 +28,8 @@ interface Texts {
   mcpHint: string;
   /** Replaces the @ / MCP hints for a member whose messages wake no one (restricted Antigravity). */
   restrictedHint: (teamMcp: boolean) => string;
+  /** Asks for a link to each file the member made or changed for the user, so the chat can open it. */
+  filesHint: string;
   hintJoin: string;
   intro: string;
   header: (room: string, handle: string) => string;
@@ -64,6 +68,9 @@ const MCP_TOOLS = (lang: AgentLanguage) =>
       'list_schedules / create_schedule / update_schedule / delete_schedule (scheduled tasks; a new or edited one runs only after the user switches it on). ' +
       'Your reply at the end of the turn is posted to the chat automatically; do not repeat it with send_message.';
 
+/** Example path in the files hint, in this computer's form; the chat turns such links into openable file chips. */
+const PATH_EXAMPLE = process.platform === 'win32' ? 'C:/work/out/report.pdf' : '/Users/me/work/out/report.pdf';
+
 const TEXTS: Record<AgentLanguage, Texts> = {
   zh: {
     trigger: '—— 需要你处理的消息 ——',
@@ -78,6 +85,7 @@ const TEXTS: Record<AgentLanguage, Texts> = {
       '你的回复会作为你的发言发到群里。需要某位成员回应时，在回复里 @对方；只是同步进度、不需要对方回应时不要 @，以免来回打扰。',
       '达成一致或任务完成时直接说明结论，不要为了礼貌再 @ 对方。',
     ],
+    filesHint: `给用户生成或修改了文件（报告、PDF、表格等）时，在回复末尾用 Markdown 链接列出它们的绝对路径，例如 [report.pdf](${PATH_EXAMPLE})；文件夹也可以这样链接。`,
     mcpHint: MCP_TOOLS('zh'),
     restrictedHint: (teamMcp) =>
       '你处于受限模式：你的回复会发到群里，但不会唤醒其他成员，@ 其他成员不会让对方回应。' +
@@ -125,6 +133,7 @@ const TEXTS: Record<AgentLanguage, Texts> = {
         'when you only share progress and need no response, do not @ anyone, so members are not pulled back and forth.',
       'When you reach agreement or finish a task, just state the outcome; do not @ the other member only out of politeness.',
     ],
+    filesHint: `When you create or edit files for the user (reports, PDFs, tables…), end your reply with a Markdown link to each one by its absolute path, such as [report.pdf](${PATH_EXAMPLE}); folders can be linked the same way.`,
     mcpHint: MCP_TOOLS('en'),
     restrictedHint: (teamMcp) =>
       'You are in restricted mode: your reply is posted to the chat but wakes no other member, so @-mentioning a member ' +
@@ -183,8 +192,8 @@ export function teamTexts(lang: AgentLanguage | undefined) {
 
 function hintText(teamMcp: boolean, lang: AgentLanguage | undefined, restricted = false): string {
   const t = T(lang);
-  if (restricted) return `${t.hint}${t.restrictedHint(teamMcp)}`;
-  return `${t.hint}${[...t.hints, ...(teamMcp ? [t.mcpHint] : [])].join(t.hintJoin)}`;
+  if (restricted) return `${t.hint}${[t.restrictedHint(teamMcp), t.filesHint].join(t.hintJoin)}`;
+  return `${t.hint}${[...t.hints, t.filesHint, ...(teamMcp ? [t.mcpHint] : [])].join(t.hintJoin)}`;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ALL_HANDLE, type AgentCommands, type AgentWithStatus, handleKey, parseSlashCommand, type RuntimeCommand, type RuntimeDescriptor, type SteerSkip } from '../../../shared/protocol.ts';
+import { ALL_HANDLE, type AgentCommands, type AttachmentInfo, type AgentWithStatus, handleKey, parseSlashCommand, type RuntimeCommand, type RuntimeDescriptor, type SteerSkip } from '../../../shared/protocol.ts';
 import { api, newClientMessageId } from '../api.ts';
 import { clearSentDraft, historyStep, loadDraft, matchCommands, menuKey, onFirstLine, onLastLine, type Quote, saveDraft, withQuotes } from '../composer-logic.ts';
 import type { AttachmentDrafts } from '../attachments.ts';
@@ -71,7 +71,7 @@ export function Composer(props: {
   /** Opens a member's settings (where /model and /effort are changed). */
   onOpenMember?: (agentId: string) => void;
   /** `steer` (Ctrl+Enter): into the addressed members' running turns; resolves with those that got it queued instead. */
-  onSend: (body: string, clientMessageId: string, attachmentIds: string[], steer: boolean) => Promise<SteerSkip[]>;
+  onSend: (body: string, clientMessageId: string, attachmentIds: string[], steer: boolean, quotedFrom: string[]) => Promise<SteerSkip[]>;
   onError: (err: unknown) => void;
   /** No live connection to the server: typing is fine, sending waits until it is back. */
   offline?: boolean;
@@ -80,7 +80,9 @@ export function Composer(props: {
   /** What the local user sent in this room, oldest first (↑ / ↓ recall); read when browsing starts. */
   history: () => string[];
   /** Set by the composer: adds text selected in the chat as a quote. */
-  quoteRef?: { current: ((text: string, note: string) => void) | null };
+  quoteRef?: { current: ((text: string, from: string[]) => void) | null };
+  /** Set by the composer: puts a withdrawn message's text (before any draft) and attachments back. */
+  editRef?: { current: ((body: string, attachments: AttachmentInfo[]) => void) | null };
 }) {
   const t = useT();
   const lz = useLocalized();
@@ -131,8 +133,8 @@ export function Composer(props: {
   useEffect(() => {
     if (!props.quoteRef) return;
     const sink = props.quoteRef;
-    sink.current = (text, note) => {
-      setQuotes((qs) => [...qs, { id: `q${++quoteSeq}`, text, note }]);
+    sink.current = (text, from) => {
+      setQuotes((qs) => [...qs, { id: `q${++quoteSeq}`, text, note: '', from }]);
       setOpenQuote(null);
       ref.current?.focus();
     };
@@ -140,6 +142,28 @@ export function Composer(props: {
       sink.current = null;
     };
   }, [props.quoteRef]);
+  const adoptAttachments = atts.adopt;
+  useEffect(() => {
+    if (!props.editRef) return;
+    const sink = props.editRef;
+    sink.current = (body, attachments) => {
+      const cur = textNow.current;
+      const next = cur.trim() ? `${body}\n${cur}` : body;
+      setBrowse(null);
+      setText(next);
+      adoptAttachments(attachments);
+      requestAnimationFrame(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(body.length, body.length);
+        setCaret(body.length);
+      });
+    };
+    return () => {
+      sink.current = null;
+    };
+  }, [props.editRef, adoptAttachments]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -306,7 +330,8 @@ export function Composer(props: {
     const roomId = props.roomId;
     setSending(true);
     try {
-      const queued = await props.onSend(body, pendingId.current, atts.drafts.map((d) => d.info!.id), steer && !slash);
+      const quotedFrom = [...new Set(quoted.flatMap((q) => q.from))];
+      const queued = await props.onSend(body, pendingId.current, atts.drafts.map((d) => d.info!.id), steer && !slash, quotedFrom);
       pendingId.current = newClientMessageId();
       if (mounted.current) setSteerSkips(queued);
       // The room's kept draft goes unless it was changed since (the composer may be gone after a room switch).

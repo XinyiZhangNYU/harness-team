@@ -19,7 +19,7 @@ import { redactForLog, redactText } from '../redact.ts';
 
 export const TEAM_MCP_PATH = '/team-mcp/';
 
-const SUPPORTED_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+export const SUPPORTED_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 /** Texts the agent sees, in the room's agent language (Room.agentLanguage) when the session connects. */
 const INSTRUCTIONS: Record<AgentLanguage, string> = {
@@ -448,7 +448,7 @@ export function createTeamMcpHandler(opts: TeamMcpServerOptions) {
   };
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
+export async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -459,14 +459,14 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-function json(res: ServerResponse, status: number, body: unknown) {
+export function json(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
   res.end(JSON.stringify(body));
 }
 
-function text(res: ServerResponse, status: number, body: string) {
+export function text(res: ServerResponse, status: number, body: string) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.end(body);

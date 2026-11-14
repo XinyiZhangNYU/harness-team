@@ -116,6 +116,7 @@ export class SessionGrants {
   private readonly prefixes = new Set<string>();
   private readonly files = new Set<string>();
   private readonly sites = new Set<string>();
+  private readonly browserSites = new Set<string>();
   private allEdits = false;
 
   /** Starts a turn: forgets everything when what the grants were given for has changed. */
@@ -129,6 +130,7 @@ export class SessionGrants {
     this.prefixes.clear();
     this.files.clear();
     this.sites.clear();
+    this.browserSites.clear();
     this.allEdits = false;
   }
 
@@ -139,6 +141,15 @@ export class SessionGrants {
 
   grantSite(host: string) {
     this.sites.add(host);
+  }
+
+  /** Browser: the user allowed opening and acting on pages of this host (host[:port], lower case) for the session. */
+  coversBrowserSite(host: string): boolean {
+    return this.browserSites.has(host);
+  }
+
+  grantBrowserSite(host: string) {
+    this.browserSites.add(host);
   }
 
   /** Why this call needs no question, or null when it does. */

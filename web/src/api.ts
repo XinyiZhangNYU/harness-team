@@ -1,4 +1,5 @@
 import { isNotice, type NoticeText } from '../../shared/notices.ts';
+import type { BrowserSettings, BrowserSettingsResponse, KimiWebbridgeResponse } from '../../shared/protocol.ts';
 import type {
   CreateScheduleRequest,
   ScheduledTask,
@@ -36,6 +37,7 @@ import type {
   TaskStatus,
   UpdateAgentRequest,
   UpdateAgentResponse,
+  WithdrawMessageResponse,
 } from '../../shared/protocol.ts';
 
 export class ApiError extends Error {
@@ -63,6 +65,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+  browserSettings: () => request<BrowserSettingsResponse>('GET', '/api/browser-settings'),
+  kimiWebbridge: () => request<KimiWebbridgeResponse>('GET', '/api/kimi-webbridge'),
+  setBrowserSettings: (s: BrowserSettings) => request<BrowserSettingsResponse>('PUT', '/api/browser-settings', s),
   session: () => request<{ ok: boolean; serverVersion: string }>('GET', '/api/session'),
   usage: (from: string | null) =>
     request<UsageSummary>('GET', `/api/usage${from ? `?from=${encodeURIComponent(from)}` : ''}`),
@@ -114,10 +119,13 @@ export const api = {
     request<RecentWorkspacesResponse>('GET', `/api/workspaces/recent${history ? '' : '?history=0'}`),
   listDirs: (path: string | null) =>
     request<DirListing>('GET', `/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`),
-  addMember: (roomId: string, agentId: string, defaultReply = false) =>
-    request('POST', `/api/rooms/${roomId}/members`, { agentId, ...(defaultReply ? { defaultReply } : {}) }),
+  addMember: (roomId: string, agentId: string, defaultReply = false, inRoomFolder = false) =>
+    request('POST', `/api/rooms/${roomId}/members`, { agentId, ...(defaultReply ? { defaultReply } : {}), ...(inRoomFolder ? { inRoomFolder } : {}) }),
   setDefaultReply: (roomId: string, agentId: string, defaultReply: boolean) =>
     request<{ room: Room }>('PATCH', `/api/rooms/${roomId}/members/${agentId}`, { defaultReply }),
+  /** The member's working folder in this chat; null = its own. */
+  setMemberWorkspace: (roomId: string, agentId: string, workspace: string | null) =>
+    request<{ room: Room }>('PATCH', `/api/rooms/${roomId}/members/${agentId}`, { workspace }),
   /** Every current member of the room, in the new order; the result also arrives as `members.reordered`. */
   reorderMembers: (roomId: string, agentIds: string[]) =>
     request<{ ok: true }>('PUT', `/api/rooms/${encodeURIComponent(roomId)}/members/order`, { agentIds }),
@@ -125,12 +133,13 @@ export const api = {
     request<{ ok: boolean }>('DELETE', `/api/rooms/${roomId}/members/${agentId}`, {}),
   deleteAgent: (id: string) => request<{ ok: boolean }>('DELETE', `/api/agents/${id}`, {}),
   /** `steer` (Ctrl+Enter): into the running turn of each addressed member that can take it; `queued` lists the others. */
-  postMessage: (roomId: string, body: string, clientMessageId: string, attachmentIds: string[] = [], steer = false) =>
+  postMessage: (roomId: string, body: string, clientMessageId: string, attachmentIds: string[] = [], steer = false, quotedFrom: string[] = []) =>
     request<{ message: Message; queued?: SteerSkip[] }>('POST', `/api/rooms/${roomId}/messages`, {
       body,
       clientMessageId,
       ...(attachmentIds.length ? { attachmentIds } : {}),
       ...(steer ? { steer } : {}),
+      ...(quotedFrom.length ? { quotedFrom } : {}),
     }),
   /** Raw file bytes; the server decides the type from the bytes themselves. */
   uploadAttachment: async (roomId: string, file: Blob & { name?: string }): Promise<AttachmentInfo> => {
@@ -163,6 +172,7 @@ export const api = {
   interruptRoom: (roomId: string) => request<{ requested: number }>('POST', `/api/rooms/${roomId}/interrupt`, {}),
   decideApproval: (messageId: string, decision: ApprovalDecision, answers?: ApprovalAnswers) =>
     request<{ message: Message }>('POST', `/api/approvals/${messageId}`, { decision, ...(answers ? { answers } : {}) }).then((r) => r.message),
+  withdrawMessage: (messageId: string) => request<WithdrawMessageResponse>('POST', `/api/messages/${messageId}/withdraw`, {}),
   chooseSession: (messageId: string, choice: SessionChoiceOption) =>
     request<{ message: Message }>('POST', `/api/session-choices/${messageId}`, { choice }).then((r) => r.message),
 };

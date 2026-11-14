@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import type { AgentWithStatus, DeliveryInfo, Message, Room, RuntimeDescriptor, SteerSkip } from '../../../shared/protocol.ts';
+import type { AgentWithStatus, AttachmentInfo, DeliveryInfo, Message, Room, RuntimeDescriptor, SteerSkip } from '../../../shared/protocol.ts';
 import { api } from '../api.ts';
 import { useAttachmentDrafts } from '../attachments.ts';
 import { usePrefs, useT } from '../i18n.tsx';
@@ -32,7 +32,7 @@ function leadsRun(prev: Row | undefined, row: Row): boolean {
   return p.senderKind !== 'agent' || p.senderId !== m.senderId;
 }
 
-type QuoteAt = { text: string; top: number; bottom: number; left: number };
+type QuoteAt = { text: string; from: string[]; top: number; bottom: number; left: number };
 
 /** Next to selected chat text: a small button that adds the text to the composer as a quote. */
 function QuotePop({ at, onAdd, onClose }: { at: QuoteAt; onAdd: () => void; onClose: () => void }) {
@@ -102,7 +102,7 @@ export function ChatView(props: {
   runtimes: RuntimeDescriptor[];
   /** Opens a member's settings (from the slash-command list). */
   onOpenMember?: (agentId: string) => void;
-  onSend: (body: string, clientMessageId: string, attachmentIds: string[], steer: boolean) => Promise<SteerSkip[]>;
+  onSend: (body: string, clientMessageId: string, attachmentIds: string[], steer: boolean, quotedFrom: string[]) => Promise<SteerSkip[]>;
   onError: (err: unknown) => void;
   /** The live connection to the server is down (it reconnects on its own). */
   offline?: boolean;
@@ -219,7 +219,21 @@ export function ChatView(props: {
   const waitingMembers = props.members.filter((m) => m.status === 'waiting').length;
 
   // Text selected in the messages can be quoted into the composer.
-  const quoteRef = useRef<((text: string, note: string) => void) | null>(null);
+  const quoteRef = useRef<((text: string, from: string[]) => void) | null>(null);
+  // A queued message of the user's can be taken back; with "edit" its text and attachments return to the composer.
+  const editRef = useRef<((body: string, attachments: AttachmentInfo[]) => void) | null>(null);
+  const onErrorNow = useRef(props.onError);
+  onErrorNow.current = props.onError;
+  const withdraw = useCallback(async (m: Message, edit: boolean) => {
+    try {
+      const r = await api.withdrawMessage(m.id);
+      if (!r.removed) return;
+      if (edit && editRef.current) editRef.current(r.body, r.attachments);
+      else for (const a of r.attachments) void api.deleteAttachment(a.id).catch(() => {});
+    } catch (err) {
+      onErrorNow.current(err);
+    }
+  }, []);
   const [quotePop, setQuotePop] = useState<QuoteAt | null>(null);
   const closeQuote = useCallback(() => setQuotePop(null), []);
   useEffect(closeQuote, [room.id]);
@@ -233,8 +247,15 @@ export function ChatView(props: {
       if (!list.contains(range.commonAncestorContainer)) return setQuotePop(null);
       const text = sel.toString().trim();
       if (!text) return setQuotePop(null);
+      // The members whose messages the selection is in.
+      const bySeq = new Map((props.messages ?? []).map((m) => [String(m.seq), m]));
+      const from = new Set<string>();
+      for (const el of list.querySelectorAll<HTMLElement>('article.msg[data-seq]')) {
+        const m = bySeq.get(el.dataset.seq ?? '');
+        if (m?.senderKind === 'agent' && range.intersectsNode(el)) from.add(m.senderId);
+      }
       const r = range.getBoundingClientRect();
-      setQuotePop({ text, top: r.top, bottom: r.bottom, left: r.left });
+      setQuotePop({ text, from: [...from], top: r.top, bottom: r.bottom, left: r.left });
     }, 0);
   };
   const onListScroll = () => {
@@ -385,9 +406,11 @@ export function ChatView(props: {
               key={m.id}
               message={m}
               sender={m.senderKind === 'agent' ? props.agents[m.senderId] : undefined}
+              senderWorkspace={m.senderKind === 'agent' ? props.room.memberWorkspaces[m.senderId] : undefined}
               deliveries={byMessage.get(m.id)}
               agents={props.agents}
               showAvatar={showAvatar}
+              onWithdraw={withdraw}
             />,
             ...changesAfter([m]),
           ];
@@ -397,7 +420,7 @@ export function ChatView(props: {
         <QuotePop
           at={quotePop}
           onAdd={() => {
-            quoteRef.current?.(quotePop.text, '');
+            quoteRef.current?.(quotePop.text, quotePop.from);
             window.getSelection()?.removeAllRanges();
             setQuotePop(null);
           }}
@@ -407,6 +430,7 @@ export function ChatView(props: {
       <Composer
         key={room.id}
         quoteRef={quoteRef}
+        editRef={editRef}
         roomId={room.id}
         history={history}
         roomName={room.name}

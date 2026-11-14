@@ -47,7 +47,7 @@ const now = () => new Date().toISOString();
 /** rooms.auto_hop_limit is NOT NULL; a negative value stores "no limit" (Room.autoHopLimit = null). */
 const NO_HOP_LIMIT = -1;
 
-function toRoom(r: Row, defaultResponders: string[] = []): Room {
+function toRoom(r: Row, defaultResponders: string[] = [], memberWorkspaces: Record<string, string> = {}): Room {
   return {
     id: String(r.id),
     name: String(r.name),
@@ -60,6 +60,7 @@ function toRoom(r: Row, defaultResponders: string[] = []): Room {
     agentLanguage: r.agent_language === 'en' ? 'en' : 'zh',
     parallelInFolder: Number(r.parallel_in_folder ?? 0) === 1,
     defaultResponders,
+    memberWorkspaces,
   };
 }
 
@@ -165,6 +166,7 @@ function toAgent(r: Row): Agent {
     language: c.language === 'zh' || c.language === 'en' ? c.language : null,
     // Members created before the setting have none: off.
     chrome: r.runtime_kind === 'claude' ? c.chrome === true : null,
+    browser: r.runtime_kind === 'chat' ? null : c.browser === true,
     speed: (SPEED_RUNTIMES.has(r.runtime_kind as RuntimeKind) || r.runtime_kind === 'chat') && typeof c.speed === 'string' && c.speed ? c.speed : null,
     chat: r.runtime_kind === 'chat' ? chatSettings(c.chat) : null,
   };
@@ -178,6 +180,7 @@ function chatSettings(v: unknown): ChatMemberSettings {
     projectTools: typeof o.projectTools === 'boolean' ? o.projectTools : DEFAULT_CHAT_MEMBER.projectTools,
     webSearch: typeof o.webSearch === 'boolean' ? o.webSearch : DEFAULT_CHAT_MEMBER.webSearch,
     webFetch: typeof o.webFetch === 'boolean' ? o.webFetch : DEFAULT_CHAT_MEMBER.webFetch,
+    browser: typeof o.browser === 'boolean' ? o.browser : DEFAULT_CHAT_MEMBER.browser,
     dailyTokenLimit: int(o.dailyTokenLimit, 0, 1e12, DEFAULT_CHAT_MEMBER.dailyTokenLimit),
     maxToolRounds: int(o.maxToolRounds, 1, 200, DEFAULT_CHAT_MEMBER.maxToolRounds),
   };
@@ -197,6 +200,8 @@ interface AgentConfigJson {
   language?: string;
   /** Agent.chrome (Claude Code members); absent = off. */
   chrome?: boolean;
+  /** Agent.browser (runtime members); absent = off. */
+  browser?: boolean;
   /** Agent.speed (Codex, Claude Code and API members); absent = the runtime's own configuration (API: the standard tier). */
   speed?: string;
   /** Chat members only: ChatMemberSettings. */
@@ -547,12 +552,41 @@ export class Store {
       const k = String(d.room_id);
       defaults.set(k, [...(defaults.get(k) ?? []), String(d.agent_id)]);
     }
-    return (this.db.prepare('SELECT * FROM rooms ORDER BY created_at, id').all() as Row[]).map((r) => toRoom(r, defaults.get(String(r.id))));
+    const folders = new Map<string, Record<string, string>>();
+    // SELECT *: databases still being migrated (before v37) have no workspace column.
+    for (const d of this.db.prepare('SELECT * FROM room_members').all() as Row[]) {
+      if (d.workspace == null) continue;
+      const k = String(d.room_id);
+      folders.set(k, { ...folders.get(k), [String(d.agent_id)]: String(d.workspace) });
+    }
+    return (this.db.prepare('SELECT * FROM rooms ORDER BY created_at, id').all() as Row[]).map((r) =>
+      toRoom(r, defaults.get(String(r.id)), folders.get(String(r.id))),
+    );
   }
 
   getRoom(id: string): Room | undefined {
     const r = this.db.prepare('SELECT * FROM rooms WHERE id = ?').get(id) as Row | undefined;
-    return r ? toRoom(r, this.defaultResponders(id)) : undefined;
+    return r ? toRoom(r, this.defaultResponders(id), this.memberWorkspaces(id)) : undefined;
+  }
+
+  /** Members of the room that work in another folder than their own here (agent id -> folder). */
+  memberWorkspaces(roomId: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    // SELECT *: databases still being migrated (before v37) have no workspace column.
+    for (const r of this.db.prepare('SELECT * FROM room_members WHERE room_id = ?').all(roomId) as Row[]) {
+      if (r.workspace != null) out[String(r.agent_id)] = String(r.workspace);
+    }
+    return out;
+  }
+
+  /** The member's folder in this room when it is not its own (null: its own). */
+  memberWorkspace(roomId: string, agentId: string): string | null {
+    const r = this.db.prepare('SELECT * FROM room_members WHERE room_id = ? AND agent_id = ?').get(roomId, agentId) as Row | undefined;
+    return r?.workspace == null ? null : String(r.workspace);
+  }
+
+  setMemberWorkspace(roomId: string, agentId: string, workspace: string | null): boolean {
+    return Number(this.db.prepare('UPDATE room_members SET workspace = ? WHERE room_id = ? AND agent_id = ?').run(workspace, roomId, agentId).changes) > 0;
   }
 
   /** Agent ids of the room's default responders, in joining order. */
@@ -603,6 +637,7 @@ export class Store {
     permissionMode?: PermissionMode | null;
     language?: AgentLanguage | null;
     chrome?: boolean;
+    browser?: boolean;
     speed?: string | null;
     /** Chat members: their provider. */
     providerId?: string | null;
@@ -627,6 +662,7 @@ export class Store {
       billingSeen: null,
       language: input.language ?? null,
       chrome: input.runtimeKind === 'claude' ? input.chrome === true : null,
+      browser: input.runtimeKind === 'chat' ? null : input.browser === true,
       speed: SPEED_RUNTIMES.has(input.runtimeKind) || input.runtimeKind === 'chat' ? (input.speed ?? null) : null,
       chat: input.runtimeKind === 'chat' ? (input.chat ?? { ...DEFAULT_CHAT_MEMBER }) : null,
     };
@@ -638,6 +674,7 @@ export class Store {
     if (agent.permissionMode) config.permissionMode = agent.permissionMode;
     if (agent.language) config.language = agent.language;
     if (agent.chrome) config.chrome = true;
+    if (agent.browser) config.browser = true;
     if (agent.speed) config.speed = agent.speed;
     this.db
       .prepare(
@@ -685,6 +722,7 @@ export class Store {
       avatar?: string | null;
       language?: AgentLanguage | null;
       chrome?: boolean;
+      browser?: boolean;
       speed?: string | null;
       chat?: ChatMemberSettings;
     },
@@ -716,6 +754,10 @@ export class Store {
     if (patch.chrome !== undefined) {
       if (patch.chrome) config.chrome = true;
       else delete config.chrome;
+    }
+    if (patch.browser !== undefined) {
+      if (patch.browser) config.browser = true;
+      else delete config.browser;
     }
     if (patch.speed !== undefined) {
       if (patch.speed) config.speed = patch.speed;
@@ -791,11 +833,13 @@ export class Store {
   }
 
   // ---- membership ----
-  addMember(roomId: string, agentId: string, defaultReply = false): boolean {
+  addMember(roomId: string, agentId: string, defaultReply = false, workspace: string | null = null): boolean {
     const res = this.db
       .prepare('INSERT OR IGNORE INTO room_members (room_id, agent_id, joined_at, default_reply) VALUES (?, ?, ?, ?)')
       .run(roomId, agentId, now(), defaultReply ? 1 : 0);
-    return Number(res.changes) > 0;
+    if (Number(res.changes) === 0) return false;
+    if (workspace !== null) this.setMemberWorkspace(roomId, agentId, workspace);
+    return true;
   }
 
   listMembers(roomId: string): Agent[] {
@@ -1126,6 +1170,34 @@ export class Store {
       )
       .run(...params);
     return this.getDelivery(id)!;
+  }
+
+  /** Every delivery of one message. */
+  messageDeliveries(messageId: string): DeliveryInfo[] {
+    return (this.db.prepare('SELECT * FROM deliveries WHERE message_id = ? ORDER BY created_at, rowid').all(messageId) as Row[]).map(toDelivery);
+  }
+
+  /**
+   * Withdraws a user message nobody received: it stays as a "withdrawn" mark (its seq is never reused: read cursors
+   * count on it) without text or attachments, and its deliveries are removed. The attachments are unbound, not
+   * deleted, so they can go with the edited message (or are swept a day later).
+   */
+  withdrawMessage(id: string): Message {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('UPDATE attachments SET message_id = NULL, created_at = ? WHERE message_id = ?').run(now(), id);
+      this.db.prepare('DELETE FROM deliveries WHERE message_id = ?').run(id);
+      this.db
+        .prepare(
+          "UPDATE messages SET body = '', attachments_json = NULL, meta_json = ?, mentions_json = '[]', status = 'interrupted', content_redacted = 0, updated_at = ? WHERE id = ?",
+        )
+        .run(JSON.stringify({ type: 'withdrawn' } satisfies MessageMeta), now(), id);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+    return this.getMessage(id)!;
   }
 
   hasPendingDelivery(messageId: string): boolean {

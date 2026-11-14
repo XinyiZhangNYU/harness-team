@@ -1,8 +1,8 @@
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { L, type Localized, type NoticeText } from '../../../../shared/notices.ts';
-import type { PermissionMode, RuntimeBilling } from '../../../../shared/protocol.ts';
+import type { KimiWebbridgeState, PermissionMode, RuntimeBilling } from '../../../../shared/protocol.ts';
 import { PERMISSION_MODES } from '../../../../shared/protocol.ts';
 import { AcpAdapter, type AcpAdapterOptions, type ExtensionReply } from '../acp/adapter.ts';
 import { type CliLaunch, cliFromPath, cliVersion, findCli } from '../cli-path.ts';
@@ -62,6 +62,43 @@ export async function detectKimi(env: NodeJS.ProcessEnv = process.env): Promise<
   const r = await cliVersion(found, env);
   if (r.failure !== null) return { ...base, version: null, error: L('无法运行 kimi：{error}', 'Could not run kimi: {error}', { error: r.failure }) };
   return { ...base, version: r.output.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? null, error: null };
+}
+
+/** The plugin ids Kimi installs Kimi Browser Extension under (current, then the WebBridge name). */
+const WEBBRIDGE_PLUGINS = ['kimi-browser-extension', 'kimi-webbridge'];
+const WEBBRIDGE_DEFAULT_ADDR = '127.0.0.1:10086';
+
+/**
+ * Whether Kimi Browser Extension is usable by Kimi members, checked the way Kimi Code checks it itself: the service
+ * binary (~/.kimi-webbridge/bin), the Kimi plugin (only whether its folder exists: nothing in Kimi's home is read),
+ * the service's own `/status` on loopback (running, extension connected). Never starts or installs anything.
+ */
+export async function kimiWebbridgeState(
+  o: { home?: string; kimiHome?: string; fetch?: typeof fetch; platform?: NodeJS.Platform } = {},
+): Promise<KimiWebbridgeState> {
+  const home = o.home ?? homedir();
+  const kimiHome = o.kimiHome ?? process.env.KIMI_CODE_HOME ?? join(home, '.kimi-code');
+  const dir = join(home, '.kimi-webbridge');
+  const bin = join(dir, 'bin', (o.platform ?? process.platform) === 'win32' ? 'kimi-webbridge.exe' : 'kimi-webbridge');
+  const plugin = WEBBRIDGE_PLUGINS.some((id) => existsSync(join(kimiHome, 'plugins', 'managed', id)));
+  if (!existsSync(bin) || !plugin) return 'not_installed';
+  // The service writes its address next to the binary; only a loopback address is asked.
+  let addr = WEBBRIDGE_DEFAULT_ADDR;
+  try {
+    const written = readFileSync(join(dir, 'daemon.addr'), 'utf8').trim();
+    if (/^(?:127\.0\.0\.1|localhost):\d{1,5}$/.test(written)) addr = written;
+  } catch {
+    // Not written yet: the default address.
+  }
+  let status: any;
+  try {
+    const r = await (o.fetch ?? fetch)(`http://${addr}/status`, { signal: AbortSignal.timeout(1500) });
+    status = r.ok ? await r.json() : null;
+  } catch {
+    status = null;
+  }
+  if (status?.running !== true) return 'not_running';
+  return status.extension_connected === true ? 'ready' : 'no_extension';
 }
 
 const NOT_LOGGED_IN = /auth_required|not (?:logged|signed) in|authenticat(?:e|ion) (?:is )?required|unauthori[sz]ed|\/login/i;

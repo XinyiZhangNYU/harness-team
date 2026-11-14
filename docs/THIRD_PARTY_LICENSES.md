@@ -7,6 +7,7 @@
 
 | 包 | 版本 | 许可证 | 范围 |
 |---|---|---|---|
+| @playwright/mcp | 0.0.84 | Apache-2.0 | 运行时 |
 | @types/node | 24.19.2 | MIT | 开发 |
 | @types/react | 19.3.0 | MIT | 开发 |
 | @types/react-dom | 19.3.0 | MIT | 开发 |
@@ -26,7 +27,7 @@
 
 ## 已安装包汇总（含传递依赖）
 
-- 运行时：2 个 —— MIT ×2
+- 运行时：5 个 —— Apache-2.0 ×3，MIT ×2
 - 开发：419 个 —— MIT ×341，ISC ×37，Apache-2.0 ×10，BSD-3-Clause ×10，BlueOak-1.0.0 ×8，BSD-2-Clause ×5，MPL-2.0 ×2，Python-2.0 ×1，WTFPL OR ISC ×1，WTFPL ×1，0BSD ×1，(MIT OR CC0-1.0) ×1，(WTFPL OR MIT) ×1
 - 锁文件中另有 44 个未安装的可选平台包（其他操作系统/CPU 的原生二进制），未计入。
 
@@ -77,6 +78,7 @@ MPL-2.0 为文件级弱 copyleft：若将来修改并分发这些包本身，需
 | @peculiar/json-schema | 1.1.12 | MIT | 开发 |
 | @peculiar/utils | 2.0.3 | MIT | 开发 |
 | @peculiar/webcrypto | 1.7.2 | MIT | 开发 |
+| @playwright/mcp | 0.0.84 | Apache-2.0 | 运行时 |
 | @rolldown/binding-win32-x64-msvc | 1.2.16 | MIT | 开发 |
 | @rolldown/pluginutils | 1.0.1 | MIT | 开发 |
 | @sindresorhus/is | 4.6.0 | MIT | 开发 |
@@ -366,6 +368,8 @@ MPL-2.0 为文件级弱 copyleft：若将来修改并分发这些包本身，需
 | picocolors | 1.1.1 | ISC | 开发 |
 | picomatch | 4.0.7 | MIT | 开发 |
 | pkijs | 3.4.3 | BSD-3-Clause | 开发 |
+| playwright | 1.65.0-alpha-2026-10-30 | Apache-2.0 | 运行时 |
+| playwright-core | 1.65.0-alpha-2026-10-30 | Apache-2.0 | 运行时 |
 | plist | 3.1.0 | MIT | 开发 |
 | postcss | 8.5.32 | MIT | 开发 |
 | postject | 1.0.0-alpha.6 | MIT | 开发 |

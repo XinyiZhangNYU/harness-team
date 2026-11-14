@@ -4,6 +4,8 @@ import type {
   AgentDetailResponse,
   AgentLanguage,
   AgentWithStatus,
+  BrowserSettingsResponse,
+  KimiWebbridgeState,
   PermissionMode,
   PermissionModeAvailability,
   RuntimeDescriptor,
@@ -521,6 +523,17 @@ function outsideFolder(workspace: string, projectDir: string | null): boolean {
   return w !== d && !w.startsWith(d + '\\') && !w.startsWith(d + '/');
 }
 
+/** The project a member worktree (`<project>.ht-worktrees/<handle>`) belongs to; other folders are their own. */
+function projectOf(workspace: string): string {
+  const m = /^(.*[\\/])([^\\/]+)\.ht-worktrees(?:[\\/].*)?$/.exec(workspace);
+  return m ? m[1]! + m[2]! : workspace;
+}
+
+/** Where an existing member works once added to this chat: the chat's folder, unless its own is in that project. */
+function joinFolder(workspace: string, projectDir: string | null): string {
+  return projectDir && outsideFolder(projectOf(workspace), projectDir) ? projectDir : workspace;
+}
+
 /** Mock is a developer tool: offered for new members only in dev builds (existing Mock members keep working). */
 const SHOW_MOCK = import.meta.env.DEV;
 
@@ -990,6 +1003,7 @@ export function MembersPanel(props: {
           agent={open}
           roomId={memberIds.has(open.id) ? roomId : null}
           roomLanguage={memberIds.has(open.id) ? props.room.agentLanguage : null}
+          roomWorkspace={memberIds.has(open.id) && open.workspace ? (props.room.memberWorkspaces[open.id] ?? open.workspace) : null}
           defaultReply={defaults.has(open.id)}
           onClose={() => setOpenId(null)}
           onRemove={() => {
@@ -1195,7 +1209,7 @@ function AddMemberDialog(props: {
             setBusy(true);
             setError(null);
             try {
-              await api.addMember(props.room.id, a.id, defaultReply);
+              await api.addMember(props.room.id, a.id, defaultReply, true);
               props.onAdded(a);
             } catch (err) {
               setError(errorText(err));
@@ -1214,8 +1228,8 @@ function AddMemberDialog(props: {
                       {a.displayName} <span className="member-handle">@{a.handle}</span> <RuntimeBadge agent={a} />
                     </span>
                     {a.workspace && (
-                      <span className={`choice-sub mono${outsideFolder(a.workspace, props.room.projectDir) ? ' warn-text' : ''}`} title={a.workspace}>
-                        {a.workspace}
+                      <span className="choice-sub mono" title={joinFolder(a.workspace, props.room.projectDir)}>
+                        {joinFolder(a.workspace, props.room.projectDir)}
                       </span>
                     )}
                   </span>
@@ -1313,6 +1327,8 @@ function NewAgentForm(props: {
   const [language, setLanguage] = useState('');
   /** Claude Code only: ticked for a new member. */
   const [chrome, setChrome] = useState(true);
+  /** Runtime members: Harness Team's browser, off unless ticked. */
+  const [htBrowser, setHtBrowser] = useState(false);
   const [askingCollab, setAskingCollab] = useState(false);
   // New members work in the room's project folder unless the user picks another one.
   const [workspace, setWorkspace] = useState(props.room.projectDir ?? '');
@@ -1497,6 +1513,7 @@ function NewAgentForm(props: {
             ...(needsWorkspace ? { workspace: workspace.trim(), ...(worktree ? { worktree: true } : {}) } : {}),
             ...(asLanguage(language) ? { language: asLanguage(language) } : {}),
             ...(runtimeKind === 'claude' ? { chrome } : {}),
+            ...(htBrowser && runtime?.capabilities.teamMcp && runtimeKind !== 'chat' ? { browser: true } : {}),
           });
           await api.addMember(props.room.id, agent.id, props.defaultReply);
           props.onAdded(agent);
@@ -1555,6 +1572,8 @@ function NewAgentForm(props: {
         )
       )}
       {runtimeKind === 'claude' && <ChromeCheck checked={chrome} onChange={setChrome} />}
+      {runtimeKind === 'kimi' && !runtime?.isMock && <KimiBrowserCheck />}
+      {runtimeKind !== 'chat' && !runtime?.isMock && runtime?.capabilities.teamMcp && <HtBrowserCheck checked={htBrowser} onChange={setHtBrowser} />}
       {needsWorkspace && <WorkspacePicker value={workspace} onChange={setWorkspace} />}
       <details className="form-more">
         <summary>{t('add.more')}</summary>
@@ -1724,12 +1743,65 @@ function ChromeCheck(props: { checked: boolean; onChange: (on: boolean) => void 
   );
 }
 
+/**
+ * Kimi members: Kimi Browser Extension is a global Kimi plugin, loaded by every Kimi session once installed, so this only
+ * shows its state (ticked when usable); the hover says why. Never changed from here.
+ */
+function KimiBrowserCheck() {
+  const { t } = usePrefs();
+  const [state, setState] = useState<KimiWebbridgeState | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.kimiWebbridge().then(
+      (r) => live && setState(r.state),
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  return (
+    <label className="check" title={state ? t(`add.kimiBrowser.${state}`) : undefined}>
+      <input type="checkbox" checked={state === 'ready'} disabled readOnly />
+      <span>{t('add.kimiBrowser')}</span>
+    </label>
+  );
+}
+
+/**
+ * Runtime members: Harness Team's browser (Playwright) as an MCP server of the member's session. Greyed with the reason
+ * while no browser can run (it can still be turned off).
+ */
+function HtBrowserCheck(props: { checked: boolean; onChange: (on: boolean) => void }) {
+  const { t } = usePrefs();
+  const [why, setWhy] = useState<BrowserSettingsResponse['unavailable']>(null);
+  useEffect(() => {
+    let live = true;
+    api.browserSettings().then(
+      (r) => live && setWhy(r.unavailable),
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  const reason = why === 'package' ? t('cp.browserNoPackage') : why === 'no_browser' ? t('cp.browserNoBrowser') : undefined;
+  return (
+    <label className="check" title={reason}>
+      <input type="checkbox" checked={props.checked} disabled={!!why && !props.checked} onChange={(e) => props.onChange(e.target.checked)} />
+      <span>{t('add.htBrowser')}</span>
+    </label>
+  );
+}
+
 function AgentDialog(props: {
   agent: AgentWithStatus;
   /** The room the member is in (null when opened for an agent outside it). */
   roomId: string | null;
   /** That room's language, which the member follows unless it has its own. */
   roomLanguage: AgentLanguage | null;
+  /** The member's working folder in that room (null: no room, or no folder). */
+  roomWorkspace: string | null;
   defaultReply: boolean;
   onClose: () => void;
   onRemove: () => void;
@@ -1750,7 +1822,9 @@ function AgentDialog(props: {
   const [avatar, setAvatar] = useState<string | null>(a.avatar);
   const [language, setLanguage] = useState<string>(a.language ?? '');
   const [chrome, setChrome] = useState(a.chrome === true);
+  const [htBrowser, setHtBrowser] = useState(a.browser === true);
   const [defaultReply, setDefaultReply] = useState(props.defaultReply);
+  const [folder, setFolder] = useState(props.roomWorkspace ?? '');
   const [detail, setDetail] = useState<AgentDetailResponse | null>(null);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1763,13 +1837,15 @@ function AgentDialog(props: {
   const permChanged = perm !== (a.permissionMode ?? '');
   const chatChanged = isChat && JSON.stringify(chatSettings) !== JSON.stringify(a.chat ?? chatDefaults());
   const chromeChanged = a.runtimeKind === 'claude' && chrome !== (a.chrome === true);
+  const browserChanged = a.browser !== null && htBrowser !== (a.browser === true);
   const speedChanged = (SPEED_RUNTIMES.has(a.runtimeKind) || isChat) && speed !== (a.speed ?? '');
   const configChanged = modelChanged || permChanged || chatChanged || chromeChanged || speedChanged;
   const avatarChanged = avatar !== a.avatar;
   const languageChanged = language !== (a.language ?? '');
   const defaultChanged = !!props.roomId && defaultReply !== props.defaultReply;
-  const agentChanged = displayName.trim() !== a.displayName || configChanged || avatarChanged || languageChanged;
-  const dirty = agentChanged || defaultChanged;
+  const folderChanged = !!props.roomId && props.roomWorkspace !== null && folder.trim() !== props.roomWorkspace;
+  const agentChanged = displayName.trim() !== a.displayName || configChanged || avatarChanged || languageChanged || browserChanged;
+  const dirty = agentChanged || defaultChanged || folderChanged;
   const eff = a.effective;
   const reported = a.permission;
 
@@ -1780,6 +1856,7 @@ function AgentDialog(props: {
     setResult(null);
     try {
       if (defaultChanged) await api.setDefaultReply(props.roomId!, a.id, defaultReply);
+      if (folderChanged) await api.setMemberWorkspace(props.roomId!, a.id, folder.trim() || null);
       const r = agentChanged
         ? await api.updateAgent(a.id, {
             ...(displayName.trim() !== a.displayName ? { displayName: displayName.trim() } : {}),
@@ -1787,6 +1864,7 @@ function AgentDialog(props: {
             ...(permChanged ? { permissionMode: (perm || null) as PermissionMode | null, ...permissionRiskAck(perm) } : {}),
             ...(chatChanged ? { chat: chatSettings } : {}),
             ...(chromeChanged ? { chrome } : {}),
+            ...(browserChanged ? { browser: htBrowser } : {}),
             ...(speedChanged ? { speed: speed || null } : {}),
             ...(avatarChanged ? { avatar } : {}),
             ...(languageChanged ? { language: asLanguage(language) } : {}),
@@ -1845,6 +1923,7 @@ function AgentDialog(props: {
         </div>
         <LanguageField id="agent-edit-lang" value={language} roomLanguage={props.roomLanguage} onChange={setLanguage} />
         {props.roomId && <DefaultReplyCheck checked={defaultReply} onChange={setDefaultReply} />}
+        {props.roomId && props.roomWorkspace !== null && <WorkspacePicker value={folder} onChange={setFolder} />}
         {isChat ? (
           <>
             <ChatModelPicker
@@ -1865,6 +1944,8 @@ function AgentDialog(props: {
             <SpeedField runtimeKind={a.runtimeKind} cwd={a.workspace} model={cfg.model} value={speed} onChange={setSpeed} />
             <PermissionField runtimeKind={a.runtimeKind} cwd={a.workspace} handle={a.handle} value={perm} onChange={setPerm} />
             {a.runtimeKind === 'claude' && <ChromeCheck checked={chrome} onChange={setChrome} />}
+            {a.runtimeKind === 'kimi' && <KimiBrowserCheck />}
+            {a.browser !== null && <HtBrowserCheck checked={htBrowser} onChange={setHtBrowser} />}
             <CollabModeField agent={a} onResult={setResult} />
           </>
         )}
@@ -1896,7 +1977,7 @@ function AgentDialog(props: {
             </dd>
           </>
         )}
-        {a.workspace && (
+        {a.workspace && props.roomWorkspace === null && (
           <>
             <dt>{t('agent.workspace')}</dt>
             <dd className="mono">{a.workspace}</dd>

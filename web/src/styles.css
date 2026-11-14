@@ -411,6 +411,8 @@ input[type='checkbox'], input[type='radio'] { height: auto; padding: 0; accent-c
 .msg-body { margin-top: 2px; overflow-wrap: anywhere; color: var(--text); }
 .msg-failed .msg-body { color: var(--text-2); }
 .delivery-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.chip-action { gap: 4px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); cursor: pointer; }
+.chip-action:hover { background: var(--hover); color: var(--text); }
 .cursor { display: inline-block; width: 7px; height: 1em; margin-left: 2px; background: var(--accent); vertical-align: text-bottom; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -470,6 +472,15 @@ button.file-cite:hover { border-color: var(--accent); color: var(--accent); }
 .activity-head .msg-status { margin-left: auto; }
 .activity-failed .activity-icon { color: var(--err); }
 .activity-detail pre { margin: 2px 0 6px 8px; padding: 8px 10px; background: var(--code-bg); border-radius: var(--radius); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; }
+.plan-list { margin: 0 0 6px 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; }
+.plan-list ul { margin: 0; padding: 0; list-style: none; }
+.plan-note { margin: 0 0 4px; color: var(--text-2); white-space: pre-wrap; }
+.plan-step { display: flex; align-items: flex-start; gap: 8px; padding: 2px 0; color: var(--text); }
+.plan-box { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 2px; border: 1.5px solid var(--muted); border-radius: 3px; }
+.plan-done .plan-box { border-color: var(--ok); background: var(--ok); color: #fff; }
+.plan-done .plan-text { color: var(--muted); text-decoration: line-through; }
+.plan-doing .plan-box { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--bg), inset 0 0 0 7px var(--accent); }
+.plan-doing .plan-text { font-weight: 600; }
 .activity-group { position: relative; display: flex; flex-direction: column; }
 .activity-group-head { align-self: flex-start; height: 26px; margin: 2px 20px 0 64px; padding: 0 8px; border: 0; background: none; color: var(--muted); font-size: 12.5px; font-weight: 500; gap: 6px; }
 .activity-group-head:hover:not(:disabled) { background: var(--hover); color: var(--text-2); }
@@ -677,6 +688,30 @@ button.file-cite:hover { border-color: var(--accent); color: var(--accent); }
 .check { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
 .check input { margin-top: 3px; }
 
+.picker-field { display: flex; align-items: center; gap: 8px; width: 100%; height: 34px; padding: 0 10px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); color: var(--text); font-variant-numeric: tabular-nums; text-align: left; transition: border-color 0.12s, box-shadow 0.12s; }
+.picker-field .icon { color: var(--muted); }
+.picker-field:hover:not(:disabled) { border-color: var(--muted); }
+.picker-field:focus-visible, .picker-field[aria-expanded='true'] { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.picker-field:disabled { opacity: 0.6; }
+.picker-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-pop { position: fixed; z-index: 70; padding: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg); animation: pop 0.12s ease-out; }
+.picker-time { display: flex; gap: 4px; }
+.picker-col { width: 56px; height: 224px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; display: flex; flex-direction: column; gap: 2px; padding: 2px; border-radius: 8px; }
+.picker-col:focus-visible { outline: 2px solid var(--accent-soft); }
+.picker-col button { flex: none; height: 30px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.picker-col button:hover { background: var(--hover); color: var(--text); }
+.picker-col button.on { background: var(--accent-soft); color: var(--accent-soft-text); font-weight: 600; }
+.picker-datetime { display: flex; gap: 8px; }
+.picker-datetime .picker-time { padding-left: 8px; border-left: 1px solid var(--border); }
+.picker-cal { width: 252px; }
+.picker-cal-head { display: flex; align-items: center; justify-content: space-between; height: 32px; margin-bottom: 4px; font-weight: 600; }
+.picker-cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
+.picker-cal-wd { height: 24px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+.picker-cal-grid button { min-width: 0; height: 30px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--text); font-variant-numeric: tabular-nums; }
+.picker-cal-grid button:hover { background: var(--hover); }
+.picker-cal-grid button.other { color: var(--muted); }
+.picker-cal-grid button.today { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.picker-cal-grid button.on { background: var(--accent); color: var(--accent-text); font-weight: 600; }
 .segmented { display: inline-flex; padding: 3px; gap: 2px; border-radius: 9px; background: var(--surface-2); }
 .segmented button { height: 28px; padding: 0 12px; border: 0; border-radius: 7px; background: none; color: var(--text-2); font-weight: 500; }
 .segmented button:hover:not(:disabled) { background: var(--hover); }

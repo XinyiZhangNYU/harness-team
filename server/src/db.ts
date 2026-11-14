@@ -9,6 +9,7 @@ import { redactMessageCopy } from './message-copy.ts';
 import { hasLegacySecretMarker, redactLegacyLocalized, redactLegacyMessageCopy, redactLegacyText } from './legacy-copy.ts';
 import { commonProjectDir } from './workspaces.ts';
 import { redactText } from './redact.ts';
+import { claudeUsageCorrections, type ClaudeUsageRow } from './usage-correction.ts';
 
 export interface Migration {
   version: number;
@@ -847,6 +848,33 @@ export const MIGRATIONS: Migration[] = [
     name: 'usage without a known price',
     // unpriced: served at a speed tier with no known price, so the summary does not fill in the standard list price.
     sql: `ALTER TABLE usage_records ADD COLUMN unpriced INTEGER NOT NULL DEFAULT 0;`,
+  },
+  {
+    version: 37,
+    name: 'member working folder per chat',
+    // workspace: the folder a member works in in this chat when it is not the member's own (NULL = its own).
+    sql: `ALTER TABLE room_members ADD COLUMN workspace TEXT;`,
+  },
+  {
+    version: 38,
+    name: 'claude usage per turn',
+    // Claude Code records stored a process's running totals as each turn's usage (fixed with this version): restores
+    // an estimate of what each turn added (usage-correction.ts). The pre-migration backup keeps the original rows.
+    sql: '',
+    after: (db) => {
+      const rows = db
+        .prepare(
+          `SELECT id, room_id, agent_id, model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, cost_usd
+             FROM usage_records WHERE runtime_kind = 'claude' AND tokens_known = 1`,
+        )
+        .all() as unknown as ClaudeUsageRow[];
+      const update = db.prepare(
+        `UPDATE usage_records SET input_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, output_tokens = ?, reasoning_tokens = ?, cost_usd = ?
+           WHERE id = ?`,
+      );
+      for (const f of claudeUsageCorrections(rows))
+        update.run(f.input_tokens, f.cache_read_tokens, f.cache_write_tokens, f.output_tokens, f.reasoning_tokens, f.cost_usd, f.id);
+    },
   },
 ];
 

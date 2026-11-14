@@ -23,6 +23,8 @@ export interface AttachmentDrafts {
   remove: (key: string) => void;
   /** After a successful send: the server now owns the files, only local previews are released. */
   clear: () => void;
+  /** Files already on the server (a withdrawn message's) become drafts again, as they were sent. */
+  adopt: (infos: AttachmentInfo[]) => void;
   ready: boolean;
 }
 
@@ -94,13 +96,28 @@ export function useAttachmentDrafts(roomId: string, t: TFunc, onError: (err: unk
     setDrafts((list) => list.filter((x) => x.key !== key));
   }, []);
 
+  const adopt = useCallback((infos: AttachmentInfo[]) => {
+    const free = Math.max(ATTACHMENT_LIMITS.perMessage - live.current.length, 0);
+    for (const info of infos.slice(free)) void api.deleteAttachment(info.id).catch(() => {});
+    const next: DraftAttachment[] = infos.slice(0, free).map((info) => ({
+      key: `a${++seq}`,
+      name: info.name,
+      size: info.size,
+      image: info.kind === 'image',
+      preview: info.kind === 'image' ? attachmentUrl(info.id) : null,
+      state: 'ready',
+      info,
+    }));
+    if (next.length) setDrafts((list) => [...list, ...next]);
+  }, []);
+
   const clear = useCallback(() => {
     for (const d of live.current) if (d.preview) URL.revokeObjectURL(d.preview);
     live.current = [];
     setDrafts([]);
   }, []);
 
-  return { drafts, add, remove, clear, ready: drafts.every((d) => d.state === 'ready') };
+  return { drafts, add, remove, clear, adopt, ready: drafts.every((d) => d.state === 'ready') };
 }
 
 /** Same-origin URL of a stored attachment (the session cookie authenticates it). */

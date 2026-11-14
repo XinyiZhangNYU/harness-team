@@ -16,6 +16,7 @@ import {
 import { listRate, localDate } from '../../pricing.ts';
 import { CHAT_PRESETS, isVertexUrl, presetById, recommendedModel } from './catalog.ts';
 import { headersProblem, mappingProblem, parseObject } from './body.ts';
+import { browserUnavailable } from './browser.ts';
 import type { KeyFiles } from './secrets.ts';
 
 /** A refusal with a message for the user (the API turns it into a 400/409). */
@@ -77,7 +78,7 @@ export class ChatProviders {
   }
 
   response(): ChatProvidersResponse {
-    return { providers: this.list(), presets: CHAT_PRESETS, appKeys: !!this.keys.box };
+    return { providers: this.list(), presets: CHAT_PRESETS, appKeys: !!this.keys.box, browserUnavailable: browserUnavailable() };
   }
 
   list(): ChatProvider[] {

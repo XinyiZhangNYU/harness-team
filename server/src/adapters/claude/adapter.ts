@@ -53,6 +53,7 @@ import {
 } from '../types.ts';
 import { type ClaudeAuthSummary, claudeLogin, type ClaudeLogin, nativeClaudeEnv } from './detect.ts';
 import { StreamJsonProcess } from './process.ts';
+import { TaskBoard } from './tasks.ts';
 import { choiceTexts, elicitationContent, fieldsFromSchema } from '../forms.ts';
 
 /**
@@ -409,6 +410,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
       args.instructions ?? null,
       args.readableDirs ?? [],
     );
+    if (args.browserMcp) session.browserMcp = args.browserMcp;
     if (args.language) session.language = args.language;
     if (args.billing) session.shownBilling = args.billing;
     if (args.onBilling) session.onBilling = args.onBilling;
@@ -640,6 +642,8 @@ class ClaudeSession implements AgentSession {
   info: NoticeText[] = [];
   private proc: StreamJsonProcess | null = null;
   private turn: ClaudeTurn | null = null;
+  /** What the current process has reported in total so far (its `result` events count from the process start). */
+  usageSeen: ClaudeUsageSeen = { models: {}, cost: null };
   /** True once the CLI has a transcript for this id (resumed, or at least one turn was sent). */
   private persisted: boolean;
   private closed = false;
@@ -655,6 +659,8 @@ class ClaudeSession implements AgentSession {
   permission: EffectivePermission | null = null;
   /** You approved a plan (ExitPlanMode): Claude Code leaves plan mode inside the process, without reporting it. */
   planApproved = false;
+  /** The member's task list (TaskCreate / TaskUpdate), shown as the plan of each turn that changes it. */
+  readonly tasks = new TaskBoard();
   /** Fast mode was chosen but the running process did not turn it on: said once at the next turn. */
   private speedNote: NoticeText | null = null;
   /**
@@ -665,6 +671,8 @@ class ClaudeSession implements AgentSession {
   readonly adapter: ClaudeAdapter;
   readonly cwd: string;
   readonly teamMcp: TeamMcpConfig | undefined;
+  /** Harness Team's browser (Agent.browser), in the same MCP config file; its tools are allowed like Team MCP's. */
+  browserMcp: TeamMcpConfig | undefined;
   /**
    * Harness Team rules passed with --append-system-prompt on every process start of this session. Claude Code records
    * the system prompt on the conversation's first request and reuses that record on resume.
@@ -720,11 +728,12 @@ class ClaudeSession implements AgentSession {
     const config = { ...this.config };
     const env = nativeClaudeEnv(o.baseEnv ?? process.env);
     this.billing = this.shownBilling();
-    const mcpFile = this.teamMcp ? writeTeamMcpConfig(this.teamMcp) : null;
+    const servers = [this.teamMcp, this.browserMcp].filter((s): s is TeamMcpConfig => !!s);
+    const mcpFile = servers.length ? writeTeamMcpConfig(servers) : null;
     const args = [
       ...(o.argsPrefix ?? []),
       ...CLAUDE_FLAGS,
-      ...teamMcpArgs(mcpFile && this.teamMcp ? { serverName: this.teamMcp.serverName, configFile: mcpFile.file } : undefined, this.readableDirs),
+      ...teamMcpArgs(mcpFile ? { serverName: servers.map((s) => s.serverName), configFile: mcpFile.file } : undefined, this.readableDirs),
       ...(this.instructions ? ['--append-system-prompt', this.instructions] : []),
       ...modelArgs(config),
       resume ? '--resume' : '--session-id',
@@ -745,6 +754,7 @@ class ClaudeSession implements AgentSession {
       },
     });
     this.proc = proc;
+    this.usageSeen = { models: {}, cost: null };
     proc.start();
     let init: any;
     try {
@@ -983,9 +993,9 @@ class ClaudeSession implements AgentSession {
  * user sent without a prompt (user approved, 2026-11-07). The user's own permission rules still govern every other
  * tool, and their deny / ask rules still win over these (Claude Code checks deny, then ask, then allow).
  */
-export function teamMcpArgs(team: { serverName: string; configFile: string } | undefined, readableDirs: string[] = []): string[] {
+export function teamMcpArgs(team: { serverName: string | string[]; configFile: string } | undefined, readableDirs: string[] = []): string[] {
   const allowed = readableDirs.map((d) => readAllowRule(d)).filter((r): r is string => !!r);
-  if (team) allowed.unshift(`mcp__${team.serverName}`);
+  if (team) allowed.unshift(...[team.serverName].flat().map((n) => `mcp__${n}`));
   const config = team ? ['--mcp-config', team.configFile] : [];
   return [...config, ...(allowed.length ? ['--allowedTools', ...allowed] : [])];
 }
@@ -1039,7 +1049,7 @@ function processAlive(pid: number): boolean {
  * claude process exits, and any left over when the Core itself exits. A hard kill of the Core can leave one behind
  * (its token was only valid inside that Core run); the next Core removes it before writing its first one.
  */
-export function writeTeamMcpConfig(team: TeamMcpConfig): { file: string; remove(): void } {
+export function writeTeamMcpConfig(team: TeamMcpConfig | TeamMcpConfig[]): { file: string; remove(): void } {
   if (!exitHooked) {
     exitHooked = true;
     sweepStaleMcpDirs();
@@ -1065,7 +1075,8 @@ export function writeTeamMcpConfig(team: TeamMcpConfig): { file: string; remove(
   };
   liveMcpDirs.add(dir);
   try {
-    writeFileSync(file, JSON.stringify({ mcpServers: { [team.serverName]: { type: 'http', url: team.url } } }), { mode: 0o600 });
+    const mcpServers = Object.fromEntries([team].flat().map((s) => [s.serverName, { type: 'http', url: s.url }]));
+    writeFileSync(file, JSON.stringify({ mcpServers }), { mode: 0o600 });
   } catch (e) {
     remove();
     throw e;
@@ -1145,6 +1156,8 @@ class ClaudeTurn {
   /** request_id -> the tool request (input is echoed back unchanged on allow) or MCP elicitation as Claude Code sent it. */
   private readonly pending = new Map<string, ClaudePending>();
   private readonly tools = new Map<string, ToolState>();
+  /** The item that shows the member's task list in this turn. */
+  private readonly planItem = `plan:${randomUUID()}`;
   private curMsgId = '';
   private readonly streamIdx = new Map<number, string>();
   private readonly streamTextCount = new Map<string, number>();
@@ -1467,6 +1480,12 @@ class ClaudeTurn {
       } else if (block?.type === 'tool_use' && block.id) {
         const mapped = mapTool(String(block.name), block.input ?? {}, this.session.cwd);
         this.tools.set(block.id, { name: block.name, input: block.input, sub, mapped });
+        if (!sub && TASK_TOOLS.has(block.name)) {
+          if (block.name === 'TaskCreate') this.session.tasks.create(block.id, block.input);
+          else this.session.tasks.update(block.input);
+          this.emitTasks();
+          continue;
+        }
         this.emit({
           type: 'activity',
           itemId: block.id,
@@ -1490,6 +1509,13 @@ class ClaudeTurn {
       if (!t) continue;
       const failed = block.is_error === true;
       const out = resultText(block.content);
+      if (!t.sub && TASK_TOOLS.has(t.name)) {
+        if (t.name === 'TaskCreate') {
+          this.session.tasks.created(block.tool_use_id, failed, out);
+          this.emitTasks();
+        }
+        if (!failed) continue;
+      }
       // As Claude Code 2.1.319 answers an Agent call it runs in the background.
       const launched = !t.sub && !failed && (t.name === 'Agent' || t.name === 'Task') ? /^Async agent launched/.exec(out ?? '') : null;
       if (launched) this.backgroundStarted(block.tool_use_id, /agentId:\s*([\w-]+)/.exec(out ?? '')?.[1] ?? null);
@@ -1505,6 +1531,19 @@ class ClaudeTurn {
         failed,
       });
     }
+  }
+
+  private emitTasks() {
+    const tasks = this.session.tasks.list();
+    this.emit({
+      type: 'activity',
+      itemId: this.planItem,
+      activity: 'plan',
+      ...titled(N('tool.plan', { done: tasks.filter((t) => t.status === 'completed').length, total: tasks.length })),
+      detail: this.session.tasks.lines() || null,
+      nativeStatus: null,
+      done: false,
+    });
   }
 
   private onRateLimit(info: any) {
@@ -1627,7 +1666,10 @@ class ClaudeTurn {
 
   private onResult(msg: any) {
     // Tokens were spent whether the turn succeeded, failed or was interrupted (each query of the turn reports its own).
-    this.usage = addUsage(this.usage, claudeUsage(msg, this.session.effective?.model ?? null));
+    // modelUsage and total_cost_usd are totals since the process started: only what this result adds is recorded.
+    const { usage, seen } = claudeUsageDelta(msg, this.session.effective?.model ?? null, this.session.usageSeen);
+    this.session.usageSeen = seen;
+    this.usage = addUsage(this.usage, usage);
     const denials: any[] = Array.isArray(msg.permission_denials) ? msg.permission_denials : [];
     if (denials.length) {
       this.emit(noticeEvent(N('claude.denied', { list: denials.map((d) => mapTool(String(d.tool_name), d.tool_input ?? {}, this.session.cwd).label ?? N('tool.other', { name: String(d.tool_name) })) })));
@@ -1737,6 +1779,45 @@ export function claudeUsage(msg: any, fallbackModel: string | null): TurnUsage[]
     costUsd: typeof msg.total_cost_usd === 'number' && Number.isFinite(msg.total_cost_usd) ? msg.total_cost_usd : null,
   };
   return row.input + row.cacheRead + row.cacheWrite + row.output > 0 ? [row] : null;
+}
+
+/** Totals one Claude Code process has reported so far: per model (`modelUsage`) and `total_cost_usd`. */
+export interface ClaudeUsageSeen {
+  models: Record<string, TurnUsage>;
+  cost: number | null;
+}
+
+/**
+ * What one `result` event adds. In a long-lived stream-json process `modelUsage` (tokens and costUSD per model) and
+ * `total_cost_usd` are totals since the process started, and a result can repeat the previous totals unchanged; only the
+ * difference to `seen` is new. A total that went down (the CLI started counting afresh) counts as new in full. Without
+ * modelUsage, the turn-level `usage` is already per query; only its cost comes from the running total.
+ */
+export function claudeUsageDelta(msg: any, fallbackModel: string | null, seen: ClaudeUsageSeen): { usage: TurnUsage[] | null; seen: ClaudeUsageSeen } {
+  const total = typeof msg?.total_cost_usd === 'number' && Number.isFinite(msg.total_cost_usd) ? msg.total_cost_usd : null;
+  const costDelta = (now: number | null, before: number | null): number | null =>
+    now === null ? null : before !== null && now >= before ? Math.max(0, now - before) : now;
+  const nextCost = total ?? seen.cost;
+  const per = msg?.modelUsage;
+  if (per && typeof per === 'object' && !Array.isArray(per) && Object.keys(per).length) {
+    const now = claudeUsage({ modelUsage: per }, fallbackModel) ?? [];
+    const models = { ...seen.models };
+    const out: TurnUsage[] = [];
+    for (const r of now) {
+      const key = r.model ?? '';
+      const p = models[key];
+      models[key] = r;
+      const grew = p && r.input >= p.input && r.cacheRead >= p.cacheRead && r.cacheWrite >= p.cacheWrite && r.output >= p.output;
+      const d: TurnUsage = grew
+        ? { ...r, input: r.input - p.input, cacheRead: r.cacheRead - p.cacheRead, cacheWrite: r.cacheWrite - p.cacheWrite, output: r.output - p.output, costUsd: costDelta(r.costUsd, p.costUsd) }
+        : { ...r };
+      if (d.input + d.cacheRead + d.cacheWrite + d.output > 0 || (d.costUsd ?? 0) > 0) out.push(d);
+    }
+    return { usage: out.length ? out : null, seen: { models, cost: nextCost } };
+  }
+  const rows = claudeUsage(msg, fallbackModel);
+  if (rows) for (const r of rows) r.costUsd = costDelta(total, seen.cost);
+  return { usage: rows, seen: { models: seen.models, cost: nextCost } };
 }
 
 type ClaudePending =
@@ -1862,6 +1943,9 @@ function describeInit(msg: any): NoticeText {
 
 // ---------------------------------------------------------------------------------------------------------------
 
+/** Claude Code's task list tools that change the list; their calls show as the turn's plan instead. */
+const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate']);
+
 type MappedTool = { activity: ActivityKind; title: string; label?: NoticeText; detail: string | null; files?: FileChange[] };
 
 function noticeEvent(n: NoticeText): { type: 'notice'; text: string; notice: NoticeText } {
@@ -1971,6 +2055,14 @@ export function mapTool(name: string, input: any, cwd: string): MappedTool {
         detail: todos.map((t) => `${mark[t.status] ?? '[ ]'} ${t.content ?? t.activeForm ?? ''}`).join('\n') || null,
       };
     }
+    case 'TaskCreate':
+      return { activity: 'other', ...titled(N('tool.taskCreate', { name: String(input.subject ?? '') })), detail: input.description ? String(input.description) : null };
+    case 'TaskUpdate':
+      return { activity: 'other', ...titled(N('tool.taskUpdate', { name: String(input.subject ?? input.taskId ?? '') })), detail: input.status ? String(input.status) : null };
+    case 'TaskList':
+      return { activity: 'other', ...titled(N('tool.taskList')), detail: null };
+    case 'TaskGet':
+      return { activity: 'other', ...titled(N('tool.taskGet', { name: String(input.taskId ?? '') })), detail: null };
     case 'Task':
     case 'Agent':
       return { activity: 'other', ...titled(N('tool.subagent', { name: String(input.description ?? input.subagent_type ?? '') })), detail: head(input.prompt ? String(input.prompt) : null, 2000) };

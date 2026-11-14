@@ -3,6 +3,7 @@ import type { ActivityKind, AgentWithStatus, ApprovalAnswers, ApprovalAnswerValu
 import { api } from '../api.ts';
 import { fromLocalInput, toLocalInput } from '../date-time.ts';
 import { readableCommand } from '../format.ts';
+import { parsePlan, type Plan } from '../plan.ts';
 import { localizeApprovalDetail, localizeDetail } from '../../../shared/notices.ts';
 import { usePrefs, useT, type TFunc, useNoticeText } from '../i18n.tsx';
 import { errorText } from './Dialog.tsx';
@@ -69,6 +70,16 @@ export function ActivityItem({ message, sender, showAvatar }: { message: Message
       </span>
     </>
   );
+  const plan = kind === 'plan' ? parsePlan(meta?.detail ? localizeDetail(meta.detail, lang) : null) : null;
+  if (plan) {
+    return (
+      <div className={`activity activity-plan activity-${message.status}`} data-seq={message.seq} data-native-item={meta?.nativeItemId}>
+        {lead(showAvatar, sender)}
+        <div className="activity-head">{head}</div>
+        <PlanList plan={plan} />
+      </div>
+    );
+  }
   return (
     <div className={`activity activity-${message.status}`} data-seq={message.seq} data-native-item={meta?.nativeItemId}>
       {lead(showAvatar, sender)}
@@ -84,12 +95,57 @@ export function ActivityItem({ message, sender, showAvatar }: { message: Message
   );
 }
 
+function PlanList({ plan }: { plan: Plan }) {
+  return (
+    <div className="plan-list">
+      {plan.notes.map((n, i) => (
+        <p key={`n${i}`} className="plan-note">
+          {n}
+        </p>
+      ))}
+      <ul>
+        {plan.steps.map((s, i) => (
+          <li key={i} className={`plan-step plan-${s.state}`}>
+            <span className="plan-box" aria-hidden="true">
+              {s.state === 'done' && <Icon name="check" size={11} />}
+            </span>
+            <span className="plan-text">{s.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 type ApprovalMeta = Extract<NonNullable<Message['meta']>, { type: 'approval' }>;
-/** Chat members ask for a command, a file or a website, and "for this session" covers exactly that one. */
+/**
+ * Chat members ask for a command, a file, a website to read or a website to use in the browser, and "for this session"
+ * covers exactly that one. Harness Team's browser asks the same way for runtime members.
+ */
 const chatTarget = (meta: ApprovalMeta | null) =>
-  meta?.runtime !== 'chat' ? null : meta.nativeMethod === 'chat/run_command' ? 'command' : meta.nativeMethod === 'chat/fetch_url' ? 'site' : 'file';
-const SESSION_LABEL = { command: 'approval.allow_session_command', file: 'approval.allow_session_file', site: 'approval.allow_session_site' } as const;
-const SESSION_HELP = { command: 'approval.help_allow_session_command', file: 'approval.help_allow_session_file', site: 'approval.help_allow_session_site' } as const;
+  meta?.nativeMethod.startsWith('ht/browser_')
+    ? 'browser'
+    : meta?.runtime !== 'chat'
+    ? null
+    : meta.nativeMethod === 'chat/run_command'
+      ? 'command'
+      : meta.nativeMethod === 'chat/fetch_url'
+        ? 'site'
+        : meta.nativeMethod.startsWith('chat/browser_')
+          ? 'browser'
+          : 'file';
+const SESSION_LABEL = {
+  command: 'approval.allow_session_command',
+  file: 'approval.allow_session_file',
+  site: 'approval.allow_session_site',
+  browser: 'approval.allow_session_site',
+} as const;
+const SESSION_HELP = {
+  command: 'approval.help_allow_session_command',
+  file: 'approval.help_allow_session_file',
+  site: 'approval.help_allow_session_site',
+  browser: 'approval.help_allow_session_browser',
+} as const;
 
 function decisionLabel(t: TFunc, d: ApprovalDecision, meta: ApprovalMeta | null): string {
   if (d === 'allow' && meta?.form) return t(meta.form.url ? 'approval.urlDone' : meta.form.fields.length ? 'approval.submit' : 'approval.allow');
@@ -407,9 +463,14 @@ export function SessionChoiceCard({ message, sender }: { message: Message; sende
   );
 }
 
-/** What a folded group still shows: the latest item and anything still running. Failures are counted in the head. */
-export const foldedActivities = (messages: Message[]) =>
-  messages.filter((m, i) => i === messages.length - 1 || m.status === 'streaming');
+/**
+ * What a folded group still shows: its latest plan, the latest item and anything still running. Failures are counted
+ * in the head.
+ */
+export const foldedActivities = (messages: Message[]) => {
+  const plan = messages.findLast((m) => m.meta?.type === 'activity' && m.meta.activity === 'plan');
+  return messages.filter((m, i) => m === plan || i === messages.length - 1 || m.status === 'streaming');
+};
 
 /**
  * A run of consecutive tool activities by one member, folded to a summary line so long tool logs do not bury the

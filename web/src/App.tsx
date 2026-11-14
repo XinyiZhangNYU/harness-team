@@ -329,8 +329,8 @@ export function App() {
               if (membersDrawer) setDrawer('members');
               else if (membersHidden) setCollapsed('members', false);
             }}
-            onSend={async (body, clientMessageId, attachmentIds, steer) =>
-              (await api.postMessage(room.id, body, clientMessageId, attachmentIds, steer)).queued ?? []
+            onSend={async (body, clientMessageId, attachmentIds, steer, quotedFrom) =>
+              (await api.postMessage(room.id, body, clientMessageId, attachmentIds, steer, quotedFrom)).queued ?? []
             }
             onError={report}
           />

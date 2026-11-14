@@ -65,7 +65,7 @@ function attachmentPath(dataDir, ref) {
  * A file a member cited in its reply (an absolute local path), or null. Only plain local paths: on Windows a drive
  * letter path with no further ':' (no network shares, device paths or alternate streams; touching a share would
  * already send the user's credentials to that host), elsewhere a single leading '/'. Checked before the file system is
- * asked anything; the file must exist and be a regular file, not a link or a folder.
+ * asked anything; it must exist and be a regular file or a folder, not a link.
  * @param {unknown} raw
  * @param {NodeJS.Platform} [platform]
  */
@@ -80,7 +80,7 @@ function localFilePath(raw, platform = process.platform) {
   if (platform === 'win32' ? !/^[A-Za-z]:\\/.test(p) || p.startsWith('\\\\') : p.startsWith('//')) return null;
   try {
     const st = fs.lstatSync(p);
-    if (!st.isFile()) return null;
+    if (!st.isFile() && !st.isDirectory()) return null;
   } catch {
     return null;
   }

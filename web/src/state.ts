@@ -186,7 +186,11 @@ function applyEvent(state: State, e: ServerEvent): State {
     case 'message.updated': {
       const list = state.messages[e.message.roomId];
       if (!list) return state;
-      return { ...state, messages: { ...state.messages, [e.message.roomId]: upsertMessage(list, e.message) } };
+      const next = { ...state, messages: { ...state.messages, [e.message.roomId]: upsertMessage(list, e.message) } };
+      // A withdrawn message has no deliveries any more (the server removed them).
+      const ds = state.deliveries[e.message.roomId];
+      if (e.message.meta?.type !== 'withdrawn' || !ds?.some((d) => d.messageId === e.message.id)) return next;
+      return { ...next, deliveries: { ...state.deliveries, [e.message.roomId]: ds.filter((d) => d.messageId !== e.message.id) } };
     }
     case 'message.delta': {
       const list = state.messages[e.roomId];

@@ -987,6 +987,9 @@ export function ChatSettingsFields(props: { value: ChatMemberSettings; model: Ch
   const v = props.value;
   const webOff = !!props.model && !props.model.webSearch;
   const fetchOff = !!props.model && !props.model.tools;
+  const browserWhy = useChatProviders().data?.browserUnavailable ?? null;
+  const browserOff = fetchOff || !!browserWhy;
+  const browserTitle = fetchOff ? t('cp.webFetchUnsupported') : browserWhy === 'no_browser' ? t('cp.browserNoBrowser') : browserWhy === 'package' ? t('cp.browserNoPackage') : undefined;
   return (
     <>
       <div className="check-grid">
@@ -1001,6 +1004,10 @@ export function ChatSettingsFields(props: { value: ChatMemberSettings; model: Ch
         <label className={`check${fetchOff ? ' disabled' : ''}`} title={fetchOff ? t('cp.webFetchUnsupported') : undefined}>
           <input type="checkbox" checked={!!v.webFetch && !fetchOff} disabled={fetchOff} onChange={(e) => props.onChange({ ...v, webFetch: e.target.checked })} />
           <span>{t('cp.webFetch')}</span>
+        </label>
+        <label className={`check${browserOff ? ' disabled' : ''}`} title={browserTitle}>
+          <input type="checkbox" checked={!!v.browser && !browserOff} disabled={browserOff} onChange={(e) => props.onChange({ ...v, browser: e.target.checked })} />
+          <span>{t('cp.browser')}</span>
         </label>
       </div>
       <div className="field-row">
@@ -1041,6 +1048,7 @@ export const forModel = (s: ChatMemberSettings, model: ChatModel | null): ChatMe
   ...s,
   webSearch: s.webSearch && !!model?.webSearch,
   webFetch: !!s.webFetch && !!model?.tools,
+  browser: !!s.browser && !!model?.tools,
 });
 
 /** A chat model as already loaded (display only; no request). */

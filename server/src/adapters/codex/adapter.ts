@@ -585,8 +585,9 @@ export class CodexAdapter implements RuntimeAdapter {
     const conn = await this.connection();
     await this.checkBilling(conn, args);
     const want = codexMode(args.agent.permissionMode);
-    const res = await openThread(conn, cwd, args.resumeNativeSessionId, args.teamMcp, args.instructions, want, want ? 'user' : await this.ownReviewer(cwd));
+    const res = await openThread(conn, cwd, args.resumeNativeSessionId, args.teamMcp, args.instructions, want, want ? 'user' : await this.ownReviewer(cwd), args.browserMcp);
     const s = new CodexSession(this, conn, res.threadId, cwd, res.info, this.opts.interruptTimeoutMs ?? 20_000, args.teamMcp, args.instructions);
+    s.browserMcp = args.browserMcp;
     if (args.language) s.language = args.language;
     const source = args.resumeNativeSessionId ? RESUME_SOURCE : L('Codex thread/start 响应', 'Codex thread/start response');
     s.current = { model: res.model, effort: res.effort, source };
@@ -868,17 +869,34 @@ export function codexSpeeds(tiers: unknown): RuntimeSpeedOption[] {
  * key replaces only this one entry). Its tools are collaboration-only, so they are approved without a prompt; every
  * other tool keeps the user's sandbox/approval policy and human reviewer.
  */
-export function teamMcpThreadConfig(team: TeamMcpConfig | undefined): Record<string, unknown> {
-  if (!team) return {};
+export function teamMcpThreadConfig(team: TeamMcpConfig | undefined, browser?: TeamMcpConfig): Record<string, unknown> {
+  if (!team && !browser) return {};
   return {
     config: {
-      [`mcp_servers.${team.serverName}`]: {
-        url: team.url,
-        required: false,
-        startup_timeout_sec: 20,
-        tool_timeout_sec: 60,
-        default_tools_approval_mode: 'approve',
-      },
+      ...(team
+        ? {
+            [`mcp_servers.${team.serverName}`]: {
+              url: team.url,
+              required: false,
+              startup_timeout_sec: 20,
+              tool_timeout_sec: 60,
+              default_tools_approval_mode: 'approve',
+            },
+          }
+        : {}),
+      // Harness Team's browser (Agent.browser) asks the user in the chat itself, so Codex does not ask again; a call
+      // may wait that long for the user's answer.
+      ...(browser
+        ? {
+            [`mcp_servers.${browser.serverName}`]: {
+              url: browser.url,
+              required: false,
+              startup_timeout_sec: 20,
+              tool_timeout_sec: 3600,
+              default_tools_approval_mode: 'approve',
+            },
+          }
+        : {}),
     },
   };
 }
@@ -1031,6 +1049,7 @@ async function openThread(
   instructions?: string,
   perm?: CodexPermissionMode | null,
   followReviewer: CodexReviewer = 'user',
+  browser?: TeamMcpConfig,
 ): Promise<{ threadId: string; info: NoticeText[]; model: string | null; effort: string | null; sandbox: unknown; approvalPolicy: unknown; reviewer: string }> {
   let res: any;
   // The approver: the one of the chosen mode (Codex's own reviewer for auto-review, otherwise the user), or for
@@ -1039,7 +1058,7 @@ async function openThread(
   // developerInstructions: the official per-thread option for extra developer instructions (the Harness Team rules).
   // A chosen permission mode is the official sandbox / approvalPolicy thread option; nothing is sent for "follow".
   const extra = {
-    ...teamMcpThreadConfig(team),
+    ...teamMcpThreadConfig(team, browser),
     ...(instructions ? { developerInstructions: instructions } : {}),
     ...(perm ? { sandbox: CODEX_MODES[perm].sandbox, approvalPolicy: CODEX_MODES[perm].approvalPolicy } : {}),
   };
@@ -1199,6 +1218,8 @@ class CodexSession implements AgentSession {
   private readonly cwd: string;
   private readonly interruptTimeoutMs: number;
   private readonly teamMcp: TeamMcpConfig | undefined;
+  /** Harness Team's browser this thread was opened with (Agent.browser); given again on a re-resume. */
+  browserMcp: TeamMcpConfig | undefined;
   /** Harness Team rules this thread was opened with; given again when it is re-resumed after an app-server restart. */
   private readonly instructions: string | undefined;
   /** The room's agent language, for the reason sent back with a "no" (OpenSessionArgs.language). */
@@ -1247,7 +1268,7 @@ class CodexSession implements AgentSession {
         // app-server restarted: resume this exact thread on the new process (never "most recent").
         this.conn = await this.adapter.connection();
         const want = codexMode(input.config?.permissionMode);
-        const r = await openThread(this.conn, this.cwd, this.nativeSessionId, this.teamMcp, this.instructions, want, want ? 'user' : await this.adapter.ownReviewer(this.cwd));
+        const r = await openThread(this.conn, this.cwd, this.nativeSessionId, this.teamMcp, this.instructions, want, want ? 'user' : await this.adapter.ownReviewer(this.cwd), this.browserMcp);
         this.current = { model: r.model, effort: r.effort, source: RESUME_SOURCE };
         this.notePermission(r.sandbox, r.approvalPolicy, want, RESUME_SOURCE, r.reviewer);
         if (want) this.overridden = true;
@@ -1380,6 +1401,13 @@ class CodexSession implements AgentSession {
 
   get effective(): EffectiveModel | null {
     return this.current;
+  }
+
+  async unload(): Promise<void> {
+    // thread/resume on a thread the app-server still has loaded keeps that thread's MCP servers; unsubscribed, the
+    // thread is unloaded and the next thread/resume starts it with the new ones.
+    if (!this.conn.alive || this.running) return;
+    await this.conn.rpc.request('thread/unsubscribe', { threadId: this.nativeSessionId }).catch(() => {});
   }
 
   async close(): Promise<void> {

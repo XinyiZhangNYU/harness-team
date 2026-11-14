@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode, type Ref } from 'react';
-import { AVATAR_DEFAULT_KINDS, chatAvatarKey, type AvatarDefaultKey } from '../../../shared/protocol.ts';
+import { AVATAR_DEFAULT_KINDS, chatAvatarKey, type AvatarDefaultKey, type BrowserSettings, type BrowserSettingsResponse } from '../../../shared/protocol.ts';
 import { api } from '../api.ts';
 import type { NotifyState } from '../attention.ts';
 import { AvatarError, avatarFromFile, initial } from '../avatar.ts';
@@ -9,7 +9,7 @@ import { ProviderSettings, useChatProviders, useProviderPage, type ProviderView 
 import { Dialog } from './Dialog.tsx';
 import { AgentAvatar, RUNTIME_NAME, useAvatarDefault } from './RuntimeBadge.tsx';
 
-type Section = 'avatars' | 'providers';
+type Section = 'avatars' | 'providers' | 'browser';
 
 const LANGS: { value: Lang; label: string }[] = [
   { value: 'en', label: 'English' },
@@ -65,7 +65,7 @@ export function SettingsDialog(props: {
     );
     return (
       <Dialog
-        title={section === 'avatars' ? t('settings.memberAvatars') : t('cp.providers')}
+        title={section === 'avatars' ? t('settings.memberAvatars') : section === 'browser' ? t('settings.browser') : t('cp.providers')}
         className="settings-dialog settings-page"
         onClose={props.onClose}
         actions={back}
@@ -73,6 +73,8 @@ export function SettingsDialog(props: {
         <div ref={anchor} className="contents" />
         {section === 'avatars' ? (
           <AvatarDefaults />
+        ) : section === 'browser' ? (
+          <BrowserSettingsPage />
         ) : (
           <ProviderSettings onOpen={setProviderView} />
         )}
@@ -92,6 +94,10 @@ export function SettingsDialog(props: {
       <section className="settings-row">
         <div className="settings-label">{t('cp.providers')}</div>
         <ProvidersEntry buttonRef={(b) => void (openers.current.providers = b)} onOpen={() => setSection('providers')} />
+      </section>
+      <section className="settings-row">
+        <div className="settings-label">{t('settings.browser')}</div>
+        <BrowserEntry buttonRef={(b) => void (openers.current.browser = b)} onOpen={() => setSection('browser')} />
       </section>
       <section className="settings-row">
         <div className="settings-label">{t('settings.language')}</div>
@@ -278,6 +284,101 @@ function ProvidersEntry(props: { buttonRef: Ref<HTMLButtonElement>; onOpen: () =
         {providers.length > 0 && <span className="choice-sub">{providers.map((p) => p.label).join(' · ')}</span>}
       </span>
     </button>
+  );
+}
+
+const BROWSER_NAME = { chrome: 'Google Chrome', msedge: 'Microsoft Edge', firefox: 'Mozilla Firefox' } as const;
+
+function useBrowserSettings() {
+  const [data, setData] = useState<BrowserSettingsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.browserSettings().then(
+      (r) => live && setData(r),
+      (e) => live && setError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  return { data, setData, error, setError };
+}
+
+function BrowserEntry(props: { buttonRef: Ref<HTMLButtonElement>; onOpen: () => void }) {
+  const t = useT();
+  const { data } = useBrowserSettings();
+  const using = data?.using ? BROWSER_NAME[data.using] : data ? t('settings.browserNone') : '';
+  return (
+    <button type="button" ref={props.buttonRef} className="choice provider-row providers-entry" onClick={props.onOpen}>
+      <span className="choice-main">
+        <span className="choice-title">{using || '\u00a0'}</span>
+      </span>
+    </button>
+  );
+}
+
+/** Browser of API members: which browser, and the two tools the user may turn on or off. */
+function BrowserSettingsPage() {
+  const t = useT();
+  const { data, setData, error, setError } = useBrowserSettings();
+  const [busy, setBusy] = useState(false);
+  if (!data) return error ? <div className="error-text" role="alert">{error}</div> : null;
+  const save = (next: BrowserSettings) => {
+    setBusy(true);
+    setError(null);
+    api
+      .setBrowserSettings(next)
+      .then(setData, (e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
+  const s = data.settings;
+  const shown = s.browser === 'auto' ? data.using : s.browser;
+  return (
+    <>
+      {data.unavailable && (
+        <div className="error-text" role="alert">
+          {data.unavailable === 'package' ? t('cp.browserNoPackage') : t('cp.browserNoBrowser')}
+        </div>
+      )}
+      <section className="settings-row">
+        <div className="settings-label">{t('settings.browserWhich')}</div>
+        <div className="segmented" role="radiogroup" aria-label={t('settings.browserWhich')}>
+          {(['chrome', 'msedge', 'firefox'] as const).map((b) => (
+            <button
+              key={b}
+              type="button"
+              role="radio"
+              aria-checked={shown === b}
+              className={shown === b ? 'on' : undefined}
+              disabled={busy || !data.installed[b]}
+              title={data.installed[b] ? undefined : t('settings.browserNotInstalled', { name: BROWSER_NAME[b] })}
+              onClick={() => save({ ...s, browser: b })}
+            >
+              {BROWSER_NAME[b]}
+            </button>
+          ))}
+        </div>
+      </section>
+      <section className="settings-row">
+        <div className="settings-label">{t('settings.browserTools')}</div>
+        <div>
+          <label className="check">
+            <input type="checkbox" checked={s.fileUpload} disabled={busy} onChange={(e) => save({ ...s, fileUpload: e.target.checked })} />
+            {t('settings.browserUpload')}
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={s.evaluate} disabled={busy} onChange={(e) => save({ ...s, evaluate: e.target.checked })} />
+            {t('settings.browserEvaluate')}
+          </label>
+        </div>
+      </section>
+      {error && (
+        <div className="error-text" role="alert">
+          {error}
+        </div>
+      )}
+    </>
   );
 }
 

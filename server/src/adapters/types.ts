@@ -123,6 +123,8 @@ export interface OpenSessionArgs {
   onLateUsage?: (usage: TurnUsage) => void;
   /** Present when the runtime declares capabilities.teamMcp and the Core serves Team MCP. */
   teamMcp?: TeamMcpConfig;
+  /** Harness Team's browser as an MCP server (Agent.browser), when the runtime declares capabilities.teamMcp. */
+  browserMcp?: TeamMcpConfig;
   /**
    * Fixed Harness Team rules for this session, when the runtime declares capabilities.standingInstructions. Passed
    * through the runtime's official option (Claude Code --append-system-prompt, Codex developerInstructions). The Core
@@ -207,6 +209,11 @@ export interface AgentSession {
    * the binding after opening and after each turn, passed back as OpenSessionArgs.adapterState). Null = nothing.
    */
   adapterState?(): string | null;
+  /**
+   * Drops the runtime's loaded copy of the native session (it stays resumable), so the next open reads the session
+   * configuration again, such as its MCP servers. Absent: the runtime reads it again on every open.
+   */
+  unload?(): Promise<void>;
   close(): Promise<void>;
 }
 

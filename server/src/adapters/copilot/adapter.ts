@@ -7,6 +7,7 @@ import { PERMISSION_MODES } from '../../../../shared/protocol.ts';
 import { AcpAdapter, type AcpAdapterOptions, type ConfigOption, type UnstableModels } from '../acp/adapter.ts';
 import { type CliLaunch, cliFromPath, cliVersion, findCli, pathDirs } from '../cli-path.ts';
 import { redactText } from '../../redact.ts';
+import { BROWSER_MCP_SERVER } from '../../team/envelope.ts';
 
 /**
  * GitHub Copilot CLI through its official ACP server (`copilot --acp --stdio`, public preview), spoken as ACP v1.
@@ -152,8 +153,13 @@ export class CopilotAdapter extends AcpAdapter<CopilotAdapterOptions> {
     );
   }
 
+  /**
+   * Copilot asks its own permission for each MCP tool and reports only the bare tool name (no server), so a call to
+   * Harness Team's browser server would be approved twice. `--allow-tool=<server>` lets Copilot run that server's tools
+   * without asking; the server itself asks in the chat (Core.askInTurn). It exists only in sessions given it.
+   */
   protected defaultArgs(): string[] {
-    return ['--acp', '--stdio'];
+    return ['--acp', '--stdio', `--allow-tool=${BROWSER_MCP_SERVER}`];
   }
 
   /** A process Harness Team starts must not update the user's Copilot install or plugins on its own. */

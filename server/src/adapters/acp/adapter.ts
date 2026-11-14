@@ -173,6 +173,26 @@ export type ExtensionReply =
       answer: (decision: 'allow' | 'reject' | 'cancelled', answers?: ApprovalAnswers) => unknown;
     };
 
+/**
+ * The runtime's own permission prompt for a tool of Harness Team's browser server, which asks in the chat itself
+ * (Core.askInTurn): answered "allow once" so the user is not asked twice. Only for a session given that server, and
+ * matched only on the tool name the runtime reports, never on the title: Antigravity's `toolCall.name`
+ * (`mcp_harness_browser_browser_navigate`), or Grok's `use_tool` call (`_meta["x.ai/tool"].kind` "use_tool", with
+ * `rawInput.tool_name` `harness_browser__browser_navigate`). null = not such a prompt (or no "allow once" option):
+ * the ordinary approval card.
+ */
+export function htBrowserPermission(p: any): ExtensionReply | null {
+  const tc = p?.toolCall;
+  const name = tc?.name;
+  const grok = tc?._meta?.['x.ai/tool']?.kind === 'use_tool' && tc?.rawInput?.variant === 'UseTool' ? tc.rawInput.tool_name : undefined;
+  const ours =
+    (typeof name === 'string' && /^mcp_{1,2}harness_browser_{1,2}browser_[a-z_]+$/.test(name)) ||
+    (typeof grok === 'string' && /^harness_browser__browser_[a-z_]+$/.test(grok));
+  if (!ours) return null;
+  const allow = (Array.isArray(p?.options) ? p.options : []).find((o: any) => o?.kind === 'allow_once')?.optionId;
+  return allow == null ? null : { kind: 'answer', result: { outcome: { outcome: 'selected', optionId: String(allow) } } };
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Adapter
 
@@ -450,6 +470,7 @@ export abstract class AcpAdapter<O extends AcpAdapterOptions = AcpAdapterOptions
     const cwd = args.agent.workspace;
     if (!cwd) throw new NoticeError(this.t('{name} 成员需要工作目录（workspace）', '{name} members need a working folder (workspace)'));
     const s = new AcpSession(this, cwd, args.teamMcp);
+    s.browserMcp = args.browserMcp;
     s.processMode = this.isProcessMode(args.agent.permissionMode) ? args.agent.permissionMode : null;
     if (args.language) s.language = args.language;
     if (args.resumeNativeSessionId) s.restoreState(args.adapterState);
@@ -620,6 +641,8 @@ export class AcpSession implements AgentSession {
   private readonly adapter: AcpAdapter;
   private readonly cwd: string;
   private readonly teamMcp: TeamMcpConfig | undefined;
+  /** Harness Team's browser (Agent.browser), offered next to Team MCP. */
+  browserMcp: TeamMcpConfig | undefined;
 
   constructor(adapter: AcpAdapter, cwd: string, teamMcp: TeamMcpConfig | undefined) {
     this.adapter = adapter;
@@ -658,7 +681,7 @@ export class AcpSession implements AgentSession {
 
   private async open(resumeId: string | undefined, timeoutMs: number): Promise<void> {
     this.forgetReports();
-    const withMcp = !!this.teamMcp;
+    const withMcp = !!this.teamMcp || !!this.browserMcp;
     const { command, args, env } = this.adapter.launch(withMcp, this.processMode);
     const rpc = new JsonRpcProcess(
       command,
@@ -708,6 +731,10 @@ export class AcpSession implements AgentSession {
         // Team MCP over streamable HTTP; the per-session token is in the URL (never logged: see redactForLog).
         mcpServers.push({ type: 'http', name: this.teamMcp.serverName, url: this.teamMcp.url, headers: [] });
       } else info.push(this.t('运行时未声明 HTTP MCP 支持：Team MCP 不可用', 'The runtime does not declare HTTP MCP support: Team MCP is not available'));
+    }
+    if (this.browserMcp) {
+      if (this.caps?.mcpCapabilities?.http) mcpServers.push({ type: 'http', name: this.browserMcp.serverName, url: this.browserMcp.url, headers: [] });
+      else info.push(this.t('运行时未声明 HTTP MCP 支持：Harness Team 浏览器不可用', 'The runtime does not declare HTTP MCP support: the Harness Team browser is not available'));
     }
     let res: any;
     try {
@@ -1520,7 +1547,7 @@ export class AcpSession implements AgentSession {
     let ext: ExtensionReply | null = null;
     if (method === 'session/request_permission') {
       try {
-        ext = this.adapter.permissionRequest(p);
+        ext = (this.browserMcp ? htBrowserPermission(p) : null) ?? this.adapter.permissionRequest(p);
       } catch {
         ext = null;
       }
@@ -1617,6 +1644,8 @@ class AcpTurn {
   private readonly tools = new Map<string, ToolState>();
   private text = '';
   private textSeg = 0;
+  /** The runtime has repeated this turn's prompt (user_message_chunk). */
+  private echoed = false;
   private finished = false;
   private finish!: (r: TurnResult) => void;
   private readonly done: Promise<TurnResult>;
@@ -1917,9 +1946,17 @@ class AcpTurn {
         });
         return;
       }
+      case 'user_message_chunk':
+        // The runtime repeats the prompt at the start of its answer. Antigravity (agy) first sends what a background
+        // task did while no prompt ran (it holds those updates until the next prompt), then this echo: that text is
+        // ended here, so it stays a message of its own and the answer to this prompt starts a new one.
+        if (this.echoed) return;
+        this.echoed = true;
+        this.flushText();
+        return;
       default:
-        // agent_thought_chunk (Thinking text), user_message_chunk, available_commands_update, session_info_update,
-        // usage_update (context window) are not shown in the chat.
+        // agent_thought_chunk (Thinking text), available_commands_update, session_info_update, usage_update (context
+        // window) are not shown in the chat.
         return;
     }
   }

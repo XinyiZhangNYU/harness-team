@@ -5,6 +5,8 @@ export interface Quote {
   id: string;
   text: string;
   note: string;
+  /** Members whose messages the text was selected in. */
+  from: string[];
 }
 
 /**

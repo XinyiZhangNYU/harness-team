@@ -31,6 +31,7 @@ const PATHS = {
   bulb: 'M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9V16h7v-2.1A6 6 0 0 0 12 3z',
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
   clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 7v5l3 2',
+  calendar: 'M6 5h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM4 10h16M8 3v4M16 3v4',
   sidebar: 'M3 5h18v14H3zM9 5v14',
   sidebarRight: 'M3 5h18v14H3zM15 5v14',
   reply: 'M9 14l-5-5 5-5M4 9h11a5 5 0 0 1 5 5v6',

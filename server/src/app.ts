@@ -6,13 +6,13 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { z } from 'zod';
-import type { PostMessageResponse, ServerEvent } from '../../shared/protocol.ts';
+import type { BrowserSettingsResponse, KimiWebbridgeResponse, KimiWebbridgeState, PostMessageResponse, ServerEvent } from '../../shared/protocol.ts';
 import { AntigravityAdapter, type AntigravityAdapterOptions } from './adapters/antigravity/adapter.ts';
 import { DshAdapter, type DshAdapterOptions } from './adapters/dsh/adapter.ts';
 import { OpenCodeAdapter, type OpenCodeAdapterOptions } from './adapters/opencode/adapter.ts';
 import { CursorAdapter, type CursorAdapterOptions } from './adapters/cursor/adapter.ts';
 import { GrokAdapter, type GrokAdapterOptions } from './adapters/grok/adapter.ts';
-import { KimiAdapter, type KimiAdapterOptions } from './adapters/kimi/adapter.ts';
+import { KimiAdapter, type KimiAdapterOptions, kimiWebbridgeState } from './adapters/kimi/adapter.ts';
 import { CopilotAdapter, type CopilotAdapterOptions } from './adapters/copilot/adapter.ts';
 import { ClaudeAdapter, type ClaudeAdapterOptions } from './adapters/claude/adapter.ts';
 import { CodexAdapter, type CodexAdapterOptions } from './adapters/codex/adapter.ts';
@@ -36,12 +36,15 @@ import { Store } from './store.ts';
 import type { DetectedRuntimes } from './harnesses.ts';
 import { claudeProjectsDir, claudeRecentWorkspaces, DirListError, listDirectories, recentWorkspaces } from './workspaces.ts';
 import { TEAM_MCP_PATH, createTeamMcpHandler, runTeamTool, teamToolsFor } from './team/mcp.ts';
+import { BROWSER_MCP_PATH, createBrowserMcpHandler } from './team/browser-mcp.ts';
+import { commandEnv } from './adapters/chat/coding-tools.ts';
 import { ChatAdapter, type ChatHost } from './adapters/chat/adapter.ts';
+import { BrowserSettingsFile, browserUnavailable, findBrowser, installedBrowsers } from './adapters/chat/browser.ts';
 import { checkConnection, testModel } from './adapters/chat/call.ts';
 import { ChatConfigError, ChatProviders } from './adapters/chat/providers.ts';
 import { KeyFiles, type SecretBox } from './adapters/chat/secrets.ts';
 
-export const SERVER_VERSION = '0.14.0';
+export const SERVER_VERSION = '0.15.0';
 
 export interface AppOptions {
   /** 0 = pick a free port (tests). */
@@ -56,6 +59,12 @@ export interface AppOptions {
   chatIdleMs?: number;
   /** Tests only: chat members' fetch_url may reach loopback addresses. */
   chatFetchAllowPrivate?: boolean;
+  /** Tests only: chat members' browser runs without a window. */
+  chatBrowserHeadless?: boolean;
+  /** Raw Playwright MCP protocol of chat members' browsers (JSONL). */
+  browserProtocolLog?: string;
+  /** Tests only: how Kimi Browser Extension is detected (default: kimiWebbridgeState on this computer). */
+  kimiWebbridge?: () => Promise<KimiWebbridgeState>;
   /** Register the real Codex runtime (official app-server). Omitted = Codex stays unavailable. */
   codex?: CodexAdapterOptions | null;
   /** Register Claude Code through the user's own `claude` CLI (subscription login). Omitted = unavailable. */
@@ -161,6 +170,7 @@ const CreateAgent = z.object({
   acknowledgeCollabRisk: z.string().max(100).optional(),
   language: AgentLanguageSchema.nullable().optional(),
   chrome: z.boolean().optional(),
+  browser: z.boolean().optional(),
   providerId: z.string().max(100).nullable().optional(),
   chat: z.lazy(() => ChatMemberSchema).optional(),
 });
@@ -178,14 +188,22 @@ const UpdateAgent = z
     acknowledgeCollabRisk: z.string().max(100).optional(),
     language: AgentLanguageSchema.nullable().optional(),
     chrome: z.boolean().optional(),
+    browser: z.boolean().optional(),
     chat: z.lazy(() => ChatMemberSchema).optional(),
   })
   .strict();
+const BrowserSettingsSchema = z.object({
+  browser: z.enum(['auto', 'chrome', 'msedge', 'firefox']),
+  fileUpload: z.boolean(),
+  evaluate: z.boolean(),
+});
+
 const ChatMemberSchema = z
   .object({
     projectTools: z.boolean(),
     webSearch: z.boolean(),
     webFetch: z.boolean().default(false),
+    browser: z.boolean().default(false),
     dailyTokenLimit: z.number().int().min(0).max(1_000_000_000),
     maxToolRounds: z.number().int().min(1).max(200),
   })
@@ -216,8 +234,11 @@ const SaveChatModel = z
   .strict();
 const FIXED_AGENT_FIELDS = ['handle', 'runtimeKind', 'workspace', 'worktree', 'isMock', 'id', 'createdAt', 'providerId'];
 const SetAvatarDefault = z.object({ avatar: z.string().max(AGENT_AVATAR_MAX).regex(AGENT_AVATAR_RE).nullable() }).strict();
-const AddMember = z.object({ agentId: z.string(), defaultReply: z.boolean().optional() });
-const UpdateMember = z.object({ defaultReply: z.boolean() });
+const AddMember = z.object({ agentId: z.string(), defaultReply: z.boolean().optional(), inRoomFolder: z.boolean().optional() });
+const UpdateMember = z
+  .object({ defaultReply: z.boolean().optional(), workspace: z.string().max(1000).nullable().optional() })
+  .strict()
+  .refine((b) => b.defaultReply !== undefined || b.workspace !== undefined, 'nothing to change');
 const ReorderMembers = z.object({ agentIds: z.array(z.string()).max(1000) }).strict();
 const DecideApproval = z.object({ decision: z.enum(['allow', 'allow_session', 'allow_prefix', 'allow_all_edits', 'deny']), answers: z.record(z.string(), z.unknown()).optional() });
 const ChooseSession = z.object({ choice: z.enum(['restore', 'retry', 'new']) });
@@ -226,6 +247,7 @@ const PostMessage = z.object({
   clientMessageId: z.string(),
   attachmentIds: z.array(z.string().max(100)).max(ATTACHMENT_LIMITS.perMessage).optional(),
   steer: z.boolean().optional(),
+  quotedFrom: z.array(z.string().max(100)).max(50).optional(),
 });
 const UpdateRoom = z.object({
   name: z.string().max(200).optional(),
@@ -303,7 +325,30 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
   if (opts.copilot) registry.register(new CopilotAdapter(opts.copilot));
   const chatProviders = new ChatProviders(db, new KeyFiles(opts.dataDir, opts.secrets ?? null));
   let chatHost: ChatHost | null = null;
-  registry.register(new ChatAdapter({ db, providers: chatProviders, dataDir: opts.dataDir, host: () => chatHost, idleMs: opts.chatIdleMs, fetchAllowPrivate: opts.chatFetchAllowPrivate }));
+  const browserSettings = new BrowserSettingsFile(opts.dataDir);
+  registry.register(
+    new ChatAdapter({
+      db,
+      providers: chatProviders,
+      dataDir: opts.dataDir,
+      host: () => chatHost,
+      idleMs: opts.chatIdleMs,
+      fetchAllowPrivate: opts.chatFetchAllowPrivate,
+      browserSettings,
+      browserHeadless: opts.chatBrowserHeadless,
+      browserProtocolLog: opts.browserProtocolLog,
+    }),
+  );
+  const browserSettingsResponse = (): BrowserSettingsResponse => {
+    const settings = browserSettings.get();
+    const have = installedBrowsers();
+    return {
+      settings,
+      installed: { chrome: !!have.chrome, msedge: !!have.msedge, firefox: !!have.firefox },
+      using: findBrowser(settings.browser)?.channel ?? null,
+      unavailable: browserUnavailable(),
+    };
+  };
   for (const kind of ['codex', 'claude', 'antigravity', 'dsh', 'opencode', 'cursor', 'grok', 'kimi', 'copilot'] as const) {
     const why = opts.missingRuntimes?.[kind];
     if (why && !registry.get(kind)) registry.setMissing(kind, why);
@@ -418,6 +463,19 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     allowedHosts: () => policy.allowedHosts,
     auditLog: opts.teamMcpAuditLog,
   });
+  // Harness Team's browser for runtime members (Agent.browser), served next to Team MCP.
+  const browserMcp = createBrowserMcpHandler({
+    core,
+    dataDir: opts.dataDir,
+    settings: browserSettings,
+    serverVersion: SERVER_VERSION,
+    allowedHosts: () => policy.allowedHosts,
+    env: () => commandEnv(process.env, chatProviders.keyEnvNames()),
+    allowPrivate: opts.chatFetchAllowPrivate,
+    headless: opts.chatBrowserHeadless,
+    protocolLog: opts.browserProtocolLog,
+    auditLog: opts.teamMcpAuditLog,
+  });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
   let vite: { middlewares: (req: IncomingMessage, res: ServerResponse, next: () => void) => void; close(): Promise<void> } | null =
@@ -455,6 +513,10 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     if (url.pathname.startsWith(TEAM_MCP_PATH)) {
       // Agent-side collaboration endpoint; authenticated only by the per-session token in the path.
       return teamMcp(req, res, url.pathname.slice(TEAM_MCP_PATH.length));
+    }
+    if (url.pathname.startsWith(BROWSER_MCP_PATH)) {
+      // Same token as Team MCP; only answered while the member's browser is on and it runs a turn there.
+      return browserMcp.handle(req, res, url.pathname.slice(BROWSER_MCP_PATH.length));
     }
 
     if (url.pathname.startsWith('/api/')) {
@@ -538,7 +600,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     }
     if (a === 'rooms' && b && c === 'members' && !d && method === 'POST') {
       const body = AddMember.parse(await readJson(req));
-      core.addMember(b, body.agentId, body.defaultReply === true);
+      core.addMember(b, body.agentId, body.defaultReply === true, body.inRoomFolder === true);
       return sendJson(res, 200, { ok: true });
     }
     if (a === 'rooms' && b && c === 'members' && d === 'order' && parts.length === 4 && method === 'PUT') {
@@ -547,7 +609,9 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     }
     if (a === 'rooms' && b && c === 'members' && d && parts.length === 4 && method === 'PATCH') {
       const body = UpdateMember.parse(await readJson(req));
-      return sendJson(res, 200, { room: core.setDefaultReply(b, d, body.defaultReply) });
+      let room = body.workspace !== undefined ? await core.setMemberWorkspace(b, d, body.workspace) : undefined;
+      if (body.defaultReply !== undefined) room = core.setDefaultReply(b, d, body.defaultReply);
+      return sendJson(res, 200, { room: room! });
     }
     if (a === 'rooms' && b && c === 'members' && d && parts.length === 4 && method === 'DELETE') {
       await core.removeMember(b, d);
@@ -563,7 +627,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
       if (method === 'POST') {
         const body = PostMessage.parse(await readJson(req));
         await core.prepareMessage(b, body.body);
-        const sent = core.sendUserMessage(b, body.body, body.clientMessageId, body.attachmentIds ?? [], body.steer ?? false);
+        const sent = core.sendUserMessage(b, body.body, body.clientMessageId, body.attachmentIds ?? [], body.steer ?? false, undefined, body.quotedFrom ?? []);
         return sendJson(res, 201, { message: sent.message, ...(body.steer ? { queued: sent.queued } : {}) } satisfies PostMessageResponse);
       }
     }
@@ -635,6 +699,17 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
         );
       }
       return sendJson(res, 200, await core.updateAgent(b, UpdateAgent.parse(raw)));
+    }
+    if (a === 'kimi-webbridge' && !b && method === 'GET') {
+      const state = await (opts.kimiWebbridge ?? kimiWebbridgeState)();
+      return sendJson(res, 200, { state } satisfies KimiWebbridgeResponse);
+    }
+    if (a === 'browser-settings' && !b) {
+      if (method === 'GET') return sendJson(res, 200, browserSettingsResponse());
+      if (method === 'PUT') {
+        browserSettings.set(BrowserSettingsSchema.parse(await readJson(req)));
+        return sendJson(res, 200, browserSettingsResponse());
+      }
     }
     if (a === 'chat-providers') {
       const dec = (v: string | undefined) => {
@@ -736,6 +811,10 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
         throw e;
       }
     }
+    if (a === 'messages' && b && c === 'withdraw' && !d && method === 'POST') {
+      // The local user takes back a queued message of theirs (cookie-authenticated user API only).
+      return sendJson(res, 200, core.withdrawMessage(b));
+    }
     if (a === 'approvals' && b && !c && method === 'POST') {
       // The local user's decision on a native approval request (cookie-authenticated user API only).
       const body = DecideApproval.parse(await readJson(req));
@@ -824,7 +903,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
   policy = policyFor(port, token);
   const url = `http://127.0.0.1:${port}`;
   updateLockUrl(lock, url);
-  core.start(opts.teamMcp === false ? null : `${url}${TEAM_MCP_PATH}`);
+  core.start(opts.teamMcp === false ? null : `${url}${TEAM_MCP_PATH}`, opts.teamMcp === false ? null : `${url}${BROWSER_MCP_PATH}`);
 
   return {
     url,
@@ -836,6 +915,7 @@ export async function startApp(opts: AppOptions): Promise<RunningApp> {
     startup: { backupFile: prepared.backupFile, fromVersion: prepared.fromVersion, migrated: prepared.migrated },
     async close() {
       await core.shutdown();
+      await browserMcp.close();
       for (const a of registry.all()) await a.dispose?.().catch(() => {});
       for (const client of wss.clients) client.terminate();
       wss.close();

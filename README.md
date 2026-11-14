@@ -15,6 +15,7 @@ A local multi-agent group chat for coding agents. Put several coding agent CLIs 
 - **Shared folders, one turn at a time.** Members that share a working folder take turns. For parallel work, a member can get its own Git worktree.
 - **Models, effort and speed** come from each runtime's own catalog; a faster tier is used only where the runtime offers one and you pick it. Usage shows tokens, plus API list-price estimates where the runtime reports no cost.
 - **Scheduled tasks.** Send a message to one or more members (or @all) once or on a repeating schedule. Members can propose a schedule through the Team tools; it waits until you turn it on.
+- **Browser.** API members can use your installed Chrome or Edge through Playwright MCP, and a harness member can be given the same browser (off by default). Opening a site asks for your approval in the chat unless the member has full access.
 - **Local first.** The server listens on `127.0.0.1` only, with a token and Host/Origin checks. Chats are stored in SQLite on your machine.
 
 ## Install (Windows)

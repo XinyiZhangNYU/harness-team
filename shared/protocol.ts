@@ -48,7 +48,7 @@ export interface Room {
    * (the default for new rooms; pausing still stops the relay).
    */
   autoHopLimit: number | null;
-  /** Project folder the room is grouped under in the sidebar (display only; members keep their own workspaces). */
+  /** Project folder the room is grouped under in the sidebar; members added from other chats work here by default. */
   projectDir: string | null;
   /** Shown first in its group. */
   pinned: boolean;
@@ -66,6 +66,8 @@ export interface Room {
    * to the member that last posted a chat message in the room; with no such member it wakes nobody.
    */
   defaultResponders: string[];
+  /** Members that work in another folder than their own in this chat (agent id -> folder); the rest use their own. */
+  memberWorkspaces: Record<string, string>;
 }
 
 export interface RoomPatch {
@@ -294,6 +296,12 @@ export interface Agent {
    * are available when the extension is installed and connected. Each tool call still asks through approvals.
    */
   chrome: boolean | null;
+  /**
+   * Runtime members (null for API members, which have their own browser setting): Harness Team's browser (Playwright,
+   * BrowserSettings) is offered to the member's session as an MCP server. Each site and action asks in the chat unless
+   * the member's permission mode skips approvals. Default off.
+   */
+  browser: boolean | null;
   /**
    * Codex and Claude Code members: the speed chosen for this member, one of the model's RuntimeModelOption.speeds or
    * STANDARD_SPEED. null = follow the runtime's own configuration (Codex service_tier, Claude Code fastMode); nothing is sent.
@@ -624,6 +632,8 @@ export type MessageMeta =
   | { type: 'command'; agentId: string; name: string; args: string; skill?: true }
   /** A user message posted by a scheduled task when it ran (an ordinary chat message otherwise). */
   | { type: 'scheduled'; scheduleId: string }
+  /** A user message withdrawn before any member got it: its text, attachments and deliveries are gone. */
+  | { type: 'withdrawn' }
   /** System notice written by the server: `notice` is the translatable form of the body. */
   | {
       type: 'notice';
@@ -902,6 +912,15 @@ export type ServerEventInput = DistributiveOmit<Exclude<ServerEvent, { type: 'he
 
 // ---- HTTP API payloads ----
 
+/**
+ * The user withdrew a message of theirs that is still queued. `removed`: nobody had it yet, so the message is left as
+ * a "withdrawn" mark and its text and attachments come back for editing. Otherwise some members already got it: only the queued copies are
+ * cancelled (`cancelled` of them) and the message stays.
+ */
+export type WithdrawMessageResponse =
+  | { removed: true; body: string; attachments: AttachmentInfo[] }
+  | { removed: false; cancelled: number };
+
 export interface CreateRoomRequest {
   name: string;
   projectDir?: string | null;
@@ -939,6 +958,8 @@ export interface CreateAgentRequest {
   language?: AgentLanguage | null;
   /** Claude Code members only (refused otherwise); omitted = off. The app ticks it for a new Claude Code member. */
   chrome?: boolean;
+  /** Runtime members whose runtime takes MCP servers (refused otherwise); omitted = off. */
+  browser?: boolean;
   /** Chat members: the provider whose `model` they call (required for runtimeKind 'chat', refused otherwise). */
   providerId?: string;
   /** Chat members only; omitted fields take the defaults (DEFAULT_CHAT_MEMBER). */
@@ -964,6 +985,8 @@ export interface UpdateAgentRequest {
   language?: AgentLanguage | null;
   /** Claude Code members only: Claude in Chrome on or off (the idle process restarts on the same session). */
   chrome?: boolean;
+  /** Runtime members: Harness Team's browser on or off (the idle session reopens on the same native session). */
+  browser?: boolean;
   /** Chat members only: `model` is another model of the same provider; these change the member's own settings. */
   chat?: Partial<ChatMemberSettings>;
 }
@@ -995,10 +1018,14 @@ export interface AddMemberRequest {
   agentId: string;
   /** Make the member a default responder of the room (Room.defaultResponders). */
   defaultReply?: boolean;
+  /** A member of another project works in this room's folder here (Room.memberWorkspaces); default: its own. */
+  inRoomFolder?: boolean;
 }
 
 export interface UpdateMemberRequest {
-  defaultReply: boolean;
+  defaultReply?: boolean;
+  /** The member's working folder in this chat; null = its own. */
+  workspace?: string | null;
 }
 
 export interface PostMessageRequest {
@@ -1007,6 +1034,11 @@ export interface PostMessageRequest {
   clientMessageId: string;
   /** Add the message to the turn each addressed member is running now (Ctrl+Enter), where its runtime can. */
   steer?: boolean;
+  /**
+   * Members whose messages the body quotes. A message without an @mention in a chat without default responders goes to
+   * those of them that are members.
+   */
+  quotedFrom?: string[];
 }
 
 /**
@@ -1144,12 +1176,14 @@ export interface ChatMemberSettings {
   webSearch: boolean;
   /** fetch_url: GET requests Harness Team makes for the model, each approved by the user unless in full access. */
   webFetch: boolean;
+  /** Browser tools (Playwright MCP on the system Chrome, Edge or Firefox): opening a site and acting on it ask the user unless in full access. */
+  browser: boolean;
   /** Tokens (all kinds) this member may use per local day; 0 = no limit. */
   dailyTokenLimit: number;
   /** Tool rounds per turn before the turn stops. */
   maxToolRounds: number;
 }
-export const DEFAULT_CHAT_MEMBER: ChatMemberSettings = { projectTools: false, webSearch: false, webFetch: false, dailyTokenLimit: 2_000_000, maxToolRounds: 20 };
+export const DEFAULT_CHAT_MEMBER: ChatMemberSettings = { projectTools: false, webSearch: false, webFetch: false, browser: false, dailyTokenLimit: 2_000_000, maxToolRounds: 20 };
 
 /** USD per 1M tokens. */
 export interface ChatModelPrice {
@@ -1244,6 +1278,40 @@ export interface ChatProvidersResponse {
   presets: ChatPreset[];
   /** Whether keys can be stored encrypted in the app (desktop app); otherwise only environment variables work. */
   appKeys: boolean;
+  /** Browser tools of chat members: null = available; otherwise why not (the package is missing, or no Edge or Chrome was found). */
+  browserUnavailable: 'package' | 'no_browser' | null;
+}
+
+/** Which browser chat members drive: auto = Chrome, else Edge. A chosen browser that is missing falls back to the other. */
+export type BrowserChoice = 'auto' | 'chrome' | 'msedge' | 'firefox';
+
+/** App-wide browser settings of chat members. */
+export interface BrowserSettings {
+  browser: BrowserChoice;
+  /** browser_file_upload: send files of this computer to a page's file chooser (each upload approved unless in full access). */
+  fileUpload: boolean;
+  /** browser_evaluate: run JavaScript in the page (approved like a click unless in full access). */
+  evaluate: boolean;
+}
+export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = { browser: 'auto', fileUpload: true, evaluate: false };
+
+export interface BrowserSettingsResponse {
+  settings: BrowserSettings;
+  /** Which browsers are installed. */
+  installed: { chrome: boolean; msedge: boolean; firefox: boolean };
+  /** The browser members get now (null: none). */
+  using: Exclude<BrowserChoice, 'auto'> | null;
+  unavailable: 'package' | 'no_browser' | null;
+}
+
+/**
+ * Kimi Browser Extension (formerly Kimi WebBridge), Kimi Code's own browser: a global Kimi plugin (a skill the model
+ * follows with its shell tool) plus a local service and a Chrome / Edge extension. Every Kimi session loads it once
+ * installed; there is no per-member switch. ready = installed, service running, extension connected.
+ */
+export type KimiWebbridgeState = 'ready' | 'no_extension' | 'not_running' | 'not_installed';
+export interface KimiWebbridgeResponse {
+  state: KimiWebbridgeState;
 }
 
 export interface SaveChatProviderRequest {

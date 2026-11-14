@@ -71,6 +71,7 @@ try {
   dataDir,
   dev: values.dev,
   webDistDir: resolve(REPO_ROOT, 'web/dist'),
+  browserProtocolLog: process.env.HT_BROWSER_PROTOCOL_LOG || undefined,
   codex: found.codex.options ?? null,
   claude: found.claude.options ?? null,
   antigravity: found.antigravity.options ?? null,

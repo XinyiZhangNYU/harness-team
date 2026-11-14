@@ -15,6 +15,7 @@ import type {
   AgentStatus,
   AgentWithStatus,
   AttachmentInfo,
+  WithdrawMessageResponse,
   DeliveryInfo,
   DeliveryState,
   Message,
@@ -67,11 +68,11 @@ import {
 import { AttachmentFiles, safeAttachmentName, detectType } from './attachments.ts';
 import type { EventBus } from './events.ts';
 import { AttachmentBindError, type DeliveryStamp, type Store, type StoredAttachment } from './store.ts';
-import { TEAM_MCP_SERVER, type FolderPeer, buildEnvelope, buildSteerText, buildTeamInstructions, instructionsVersion, messageText, senderLabel } from './team/envelope.ts';
+import { BROWSER_MCP_SERVER, TEAM_MCP_SERVER, type FolderPeer, buildEnvelope, buildSteerText, buildTeamInstructions, instructionsVersion, messageText, senderLabel } from './team/envelope.ts';
 import { projectDirOf } from './workspaces.ts';
 import { redactStrings, redactText, StreamRedactor } from './redact.ts';
 import { redactLocalized } from './message-copy.ts';
-import { pathKey, pathsOverlap } from './path-key.ts';
+import { pathKey, pathsOverlap, relativeInside } from './path-key.ts';
 import { nextRunAfter, normalizeRepeat } from './schedule.ts';
 
 /** A scheduled run found more than this late (the app was closed, the computer slept) is recorded as missed, not sent. */
@@ -200,7 +201,17 @@ export class Core {
   private readonly standing = new WeakMap<AgentSession, string>();
   private readonly idleWaiters = new Set<() => void>();
   private teamBaseUrl: string | null = null;
+  /** Where Harness Team's browser is served to runtime members (`.../browser-mcp/`), or null when it is not. */
+  private browserBaseUrl: string | null = null;
   private readonly teamTokens = new Map<string, TeamIdentity>();
+  /** "agent:room" -> the turn running there: questions Harness Team itself asks during it (the browser) go into it. */
+  private readonly turnSinks = new Map<string, { emit: (ev: TurnEvent) => void; signal: AbortSignal }>();
+  /** Request id -> a question Harness Team asked in a running turn (askInTurn), answered by decideApproval. */
+  private readonly ownApprovals = new Map<string, { key: string; settle: (d: ApprovalDecision | 'cancelled') => void }>();
+  /** Whether a session was opened with Harness Team's browser (Agent.browser at that time). */
+  private readonly sessionBrowser = new WeakMap<AgentSession, boolean>();
+  /** Told when a member's live handles in a room go away (room null: every room), e.g. to close its browser. */
+  private readonly releaseListeners = new Set<(agentId: string | null, roomId: string | null) => void>();
   private readonly teamTokenByKey = new Map<string, string>();
   /**
    * "agent:room" -> the room message asking the user what to do with a session that could not be resumed (binding
@@ -413,8 +424,9 @@ export class Core {
    * Starts dispatching (persistent queue resumes here). `teamBaseUrl` is where Team MCP is served, e.g.
    * `http://127.0.0.1:4317/team-mcp/`; null disables Team MCP for new sessions.
    */
-  start(teamBaseUrl: string | null): void {
+  start(teamBaseUrl: string | null, browserBaseUrl: string | null = null): void {
     this.teamBaseUrl = teamBaseUrl;
+    this.browserBaseUrl = browserBaseUrl;
     this.started = true;
     if (this.files && !this.sweepTimer) {
       // Attachments uploaded but never sent: once now, then hourly.
@@ -503,7 +515,7 @@ export class Core {
   /** A cost the runtime reported after its turn ended: recorded with that turn's reply (the last one this Core saw). */
   private recordLateUsage(agentId: string, roomId: string, usage: TurnUsage): void {
     const room = this.store.getRoom(roomId);
-    const agent = this.store.getAgent(agentId);
+    const agent = this.inRoom(this.store.getAgent(agentId), roomId);
     if (!room || !agent) return;
     const ref = this.lastReply.get(`${agentId}:${roomId}`);
     const last = ref ? { replyMessageId: ref.replyMessageId(), turnStatus: ref.status } : this.store.lastUsageTurn(agentId, roomId);
@@ -535,6 +547,34 @@ export class Core {
   }
 
   /** The protected data folder that `p` is, contains or lies inside, if any. */
+  /** A member's working folder: an absolute path to an existing folder that does not overlap the data folder. */
+  private checkWorkspace(ws: string): string {
+    if (!isAbsolute(ws)) throw new CoreError(400, L('工作目录必须是绝对路径', 'The working folder must be an absolute path'));
+    const workspace = resolve(ws);
+    if (!existsSync(workspace) || !statSync(workspace).isDirectory()) {
+      throw new CoreError(400, L('工作目录不存在或不是文件夹：{path}', 'The working folder does not exist or is not a folder: {path}', { path: workspace }));
+    }
+    const dir = this.overlapsDataDir(workspace);
+    if (dir) {
+      throw new CoreError(
+        400,
+        L(
+          '工作目录与 Harness Team 数据目录重叠（{dir}）。数据目录里有本地访问令牌和数据库，成员在自己的工作目录内通常无需审批即可读写；请选择不包含数据目录的工作目录，或用 --data-dir 把数据目录放到其他位置。',
+          'The working folder overlaps the Harness Team data folder ({dir}). The data folder holds the local access token and the database, and members can usually read and write inside their working folder without approval; choose a working folder that does not contain the data folder, or move the data folder with --data-dir.',
+          { dir },
+        ),
+      );
+    }
+    return workspace;
+  }
+
+  /** The member as it works in this room: in the room's own folder for it when one is set (Room.memberWorkspaces). */
+  private inRoom<T extends Agent | undefined>(agent: T, roomId: string): T {
+    if (!agent?.workspace) return agent;
+    const ws = this.store.memberWorkspace(roomId, agent.id);
+    return ws ? { ...agent, workspace: ws } : agent;
+  }
+
   private overlapsDataDir(p: string): string | null {
     return this.protectedDirs.find((dir) => pathsOverlap(p, dir)) ?? null;
   }
@@ -643,6 +683,7 @@ export class Core {
       sessions.push(s);
     }
     this.store.deleteRoom(roomId);
+    this.release(null, roomId);
     try {
       this.files?.removeRoom(roomId);
     } catch (err) {
@@ -674,6 +715,7 @@ export class Core {
     acknowledgeCollabRisk?: string;
     language?: AgentLanguage | null;
     chrome?: boolean;
+    browser?: boolean;
     providerId?: string | null;
     chat?: ChatMemberSettings;
   }): Promise<AgentWithStatus> {
@@ -696,26 +738,12 @@ export class Core {
     const adapter = this.registry.get(input.runtimeKind);
     const desc = adapter?.describe();
     if (!adapter || !desc?.available) throw new CoreError(400, runtimeUnavailable(desc?.label ?? input.runtimeKind, desc?.note));
+    if (input.browser !== undefined && (isChat || !desc.capabilities.teamMcp)) throw browserRefused(desc.label);
     let workspace: string | undefined;
     if (desc.requiresWorkspace || input.workspace?.trim()) {
       const ws = unquotePath(input.workspace ?? '');
       if (!ws) throw new CoreError(400, L('{runtime} 成员需要工作目录', '{runtime} members need a working folder', { runtime: desc.label }));
-      if (!isAbsolute(ws)) throw new CoreError(400, L('工作目录必须是绝对路径', 'The working folder must be an absolute path'));
-      workspace = resolve(ws);
-      if (!existsSync(workspace) || !statSync(workspace).isDirectory()) {
-        throw new CoreError(400, L('工作目录不存在或不是文件夹：{path}', 'The working folder does not exist or is not a folder: {path}', { path: workspace }));
-      }
-      const dir = this.overlapsDataDir(workspace);
-      if (dir) {
-        throw new CoreError(
-          400,
-          L(
-            '工作目录与 Harness Team 数据目录重叠（{dir}）。数据目录里有本地访问令牌和数据库，成员在自己的工作目录内通常无需审批即可读写；请选择不包含数据目录的工作目录，或用 --data-dir 把数据目录放到其他位置。',
-            'The working folder overlaps the Harness Team data folder ({dir}). The data folder holds the local access token and the database, and members can usually read and write inside their working folder without approval; choose a working folder that does not contain the data folder, or move the data folder with --data-dir.',
-            { dir },
-          ),
-        );
-      }
+      workspace = this.checkWorkspace(ws);
     }
     if (input.worktree && !workspace) throw new CoreError(400, L('创建 Worktree 需要一个 Git 仓库作为工作目录', 'Creating a worktree needs a Git repository as the working folder'));
     const model = normalizeOption(input.model);
@@ -754,6 +782,7 @@ export class Core {
         permissionMode,
         language: input.language ?? null,
         ...(input.runtimeKind === 'claude' ? { chrome: input.chrome === true } : {}),
+        ...(isChat ? {} : { browser: input.browser === true }),
         ...(isChat ? { providerId: input.providerId ?? null, chat: input.chat ?? { ...DEFAULT_CHAT_MEMBER } } : {}),
       });
     } catch (e) {
@@ -947,6 +976,7 @@ export class Core {
       acknowledgeCollabRisk?: string;
       language?: AgentLanguage | null;
       chrome?: boolean;
+      browser?: boolean;
       chat?: ChatMemberSettings;
     },
   ): Promise<UpdateAgentResponse> {
@@ -976,6 +1006,11 @@ export class Core {
     if (patch.chrome !== undefined && cur.runtimeKind !== 'claude') throw new CoreError(400, L('只有 Claude Code 成员可以启用 Claude in Chrome', 'Only Claude Code members can use Claude in Chrome'));
     // A launch flag, like the model: the idle process is restarted on the same session before the next turn.
     const chromeChanged = patch.chrome !== undefined && patch.chrome !== cur.chrome;
+    if (patch.browser !== undefined && (cur.runtimeKind === 'chat' || !this.registry.get(cur.runtimeKind)?.describe().capabilities.teamMcp)) {
+      throw browserRefused(this.registry.get(cur.runtimeKind)?.describe().label ?? cur.runtimeKind);
+    }
+    // The idle session reopens on the same native session with or without the browser before the next turn.
+    const browserChanged = patch.browser !== undefined && patch.browser !== cur.browser;
     const configChanged = modelChanged || permissionMode !== cur.permissionMode || chromeChanged;
     if (patch.chat !== undefined && cur.runtimeKind !== 'chat') throw new CoreError(400, L('只有 API 成员有这些设置', 'Only API members have these settings'));
     if (modelChanged) {
@@ -990,7 +1025,7 @@ export class Core {
     const avatarChanged = patch.avatar !== undefined && (patch.avatar || null) !== cur.avatar;
     // Like the room's language, it takes effect from the member's next turn without a new session.
     const languageChanged = patch.language !== undefined && (patch.language ?? null) !== cur.language;
-    if (!configChanged && !nameChanged && !avatarChanged && !collabChanged && !languageChanged && !chatChanged) return { agent: this.withStatus(cur), applies: 'unchanged' };
+    if (!configChanged && !nameChanged && !avatarChanged && !collabChanged && !languageChanged && !chatChanged && !browserChanged) return { agent: this.withStatus(cur), applies: 'unchanged' };
     let agent = this.store.updateAgent(agentId, {
       displayName,
       model,
@@ -1000,10 +1035,16 @@ export class Core {
       ...(avatarChanged ? { avatar: patch.avatar || null } : {}),
       ...(languageChanged ? { language: patch.language ?? null } : {}),
       ...(chromeChanged ? { chrome: patch.chrome } : {}),
+      ...(browserChanged ? { browser: patch.browser } : {}),
       ...(chatChanged ? { chat: patch.chat } : {}),
     });
+    if (browserChanged && !patch.browser) this.release(agentId, null);
     if (collabChanged) agent = this.setCollabMode(agent, patch.collabMode!);
     let applies: UpdateAgentResponse['applies'] = 'now'; // a display name, avatar or language applies at once (language: next turn)
+    if (browserChanged) {
+      const st = this.agents.get(agentId);
+      if (st?.current || st?.waiting) applies = 'after_turn';
+    }
     if (configChanged) {
       const st = this.agents.get(agentId);
       const busy = !!(st?.current || st?.waiting);
@@ -1129,21 +1170,25 @@ export class Core {
     return { agent: this.withStatus(agent), sessions };
   }
 
-  addMember(roomId: string, agentId: string, defaultReply = false): void {
+  addMember(roomId: string, agentId: string, defaultReply = false, inRoomFolder = false): void {
     if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
     const agent = this.store.getAgent(agentId);
     if (!agent) throw new CoreError(404, 'agent not found');
     if (agent.deletedAt) throw new CoreError(409, L('@{handle} 已删除，不能再加入群聊', '@{handle} was deleted and cannot join chats any more', { handle: agent.handle }));
-    if (this.store.addMember(roomId, agentId, defaultReply)) {
+    // inRoomFolder (an existing member added from the members page): one from another project works in this chat's
+    // folder; its own folder inside this project, or its worktree of it, stays its own. A room without a project
+    // joins the project of its first member that has a workspace.
+    const before = this.store.getRoom(roomId)!;
+    const ws = agent.workspace;
+    const dir = before.projectDir;
+    const project = ws ? projectDirOf(ws) : null;
+    const elsewhere = inRoomFolder && !!project && !!dir && pathKey(project) !== pathKey(dir) && relativeInside(dir, project) === null;
+    const folder = elsewhere && existsSync(dir!) && statSync(dir!).isDirectory() && !this.overlapsDataDir(dir!) ? dir : null;
+    if (this.store.addMember(roomId, agentId, defaultReply, folder)) {
       this.bus.publish({ type: 'member.added', roomId, agentId });
-      if (defaultReply) this.bus.publish({ type: 'room.updated', room: this.store.getRoom(roomId)! });
-      // A room without a project joins the project of its first member that has a workspace.
-      const room = this.store.getRoom(roomId)!;
-      const ws = this.store.getAgent(agentId)?.workspace;
-      const project = !room.projectDir && ws ? projectDirOf(ws) : null;
-      if (project && !this.overlapsDataDir(project)) {
+      if (!dir && project && !this.overlapsDataDir(project)) {
         this.bus.publish({ type: 'room.updated', room: this.store.updateRoom(roomId, { projectDir: project }) });
-      }
+      } else if (defaultReply || folder) this.bus.publish({ type: 'room.updated', room: this.store.getRoom(roomId)! });
     }
   }
 
@@ -1180,6 +1225,56 @@ export class Core {
     this.systemNotice(roomId, N('agent.removed', { handle: agent.handle }));
     this.notifyIdle();
     await session?.close().catch(() => {});
+  }
+
+  /**
+   * Sets the folder a member works in in this chat (null or its own folder: its own). Refused while it runs here. The
+   * native session of this chat starts anew in the new folder on its next turn (a session keeps the folder it started
+   * in); what is queued for it waits for that turn.
+   */
+  async setMemberWorkspace(roomId: string, agentId: string, raw: string | null): Promise<Room> {
+    if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
+    const agent = this.store.getAgent(agentId);
+    if (!agent || !this.store.isMember(roomId, agentId)) throw new CoreError(404, 'member not found');
+    if (!agent.workspace) throw new CoreError(400, L('@{handle} 没有工作目录', '@{handle} has no working folder', { handle: agent.handle }));
+    const input = raw === null ? '' : unquotePath(raw);
+    const ws = input ? this.checkWorkspace(input) : agent.workspace;
+    const next = pathKey(ws) === pathKey(agent.workspace) ? null : ws;
+    const cur = this.store.memberWorkspace(roomId, agentId);
+    if ((next === null ? null : pathKey(next)) === (cur === null ? null : pathKey(cur))) return this.store.getRoom(roomId)!;
+    if (this.agents.get(agentId)?.activeRoom === roomId) {
+      throw new CoreError(
+        409,
+        L('@{handle} 正在这个群聊中运行或等待工作目录，请等其停止后再改工作目录。', '@{handle} is running or waiting for a working folder in this chat; change its folder once it has stopped.', { handle: agent.handle }),
+      );
+    }
+    this.store.setMemberWorkspace(roomId, agentId, next);
+    const key = `${agentId}:${roomId}`;
+    const session = this.sessions.get(key);
+    this.sessions.delete(key);
+    const binding = this.store.getBinding(agentId, roomId);
+    if (binding && binding.status !== 'closed') {
+      this.store.setBindingStatus(agentId, roomId, 'closed');
+      this.sessionReset.add(key);
+    }
+    // A session that could not be resumed no longer matters: its waiting messages go to the new one.
+    const choice = this.sessionChoices.get(key);
+    if (choice) {
+      const m = this.store.getMessage(choice);
+      if (m?.meta?.type === 'notice' && m.meta.sessionChoice?.state === 'pending') {
+        const updated = this.store.updateMessage(m.id, { meta: { ...m.meta, sessionChoice: { ...m.meta.sessionChoice, state: 'new' } } });
+        this.bus.publish({ type: 'message.updated', message: updated });
+      }
+      this.sessionChoices.delete(key);
+    }
+    const waiting = (this.parked.get(key) ?? []).map((d) => this.store.getDelivery(d.id)).filter((d): d is DeliveryInfo => d?.state === 'queued');
+    this.parked.delete(key);
+    for (const d of waiting) this.enqueue(d);
+    const room = this.store.getRoom(roomId)!;
+    this.bus.publish({ type: 'room.updated', room });
+    this.systemNotice(roomId, N('member.folder', { handle: agent.handle, path: next ?? agent.workspace }));
+    await session?.close().catch(() => {});
+    return room;
   }
 
   /** Puts the room's members in the order given (the members panel's drag); the list must hold each member once. */
@@ -1242,7 +1337,24 @@ export class Core {
     this.teamTokenByKey.delete(key);
     const session = this.sessions.get(key);
     this.sessions.delete(key);
+    this.release(agentId, roomId);
     return session;
+  }
+
+  /** Runs `cb` whenever a member's handles in a room go away (agentId/roomId null: all of them). Returns an unsubscribe. */
+  onRelease(cb: (agentId: string | null, roomId: string | null) => void): () => void {
+    this.releaseListeners.add(cb);
+    return () => this.releaseListeners.delete(cb);
+  }
+
+  private release(agentId: string | null, roomId: string | null) {
+    for (const cb of this.releaseListeners) {
+      try {
+        cb(agentId, roomId);
+      } catch {
+        // a listener's failure must not stop the caller
+      }
+    }
   }
 
   /**
@@ -1314,7 +1426,7 @@ export class Core {
   /**
    * Posts a message from the local user. With `steer` (Ctrl+Enter), a member working on a turn in this chat whose
    * runtime can take it gets the message inside that turn; `queued` lists the working members that get it with their
-   * next turn instead. A command is always a turn of its own.
+   * next turn instead. A command is always a turn of its own. `quotedFrom`: members whose messages the body quotes.
    */
   sendUserMessage(
     roomId: string,
@@ -1323,6 +1435,7 @@ export class Core {
     attachmentIds: string[] = [],
     steer = false,
     scheduleId?: string,
+    quotedFrom: string[] = [],
   ): { message: Message; queued: SteerSkip[] } {
     if (!this.store.getRoom(roomId)) throw new CoreError(404, 'room not found');
     const text = body.replace(/\r\n/g, '\n');
@@ -1361,8 +1474,8 @@ export class Core {
       }
     }
     const targets = command ? [command.agent] : this.targetsOf(roomId, text, null);
-    // No @ at all (an @ of a non-member still wakes nobody): the room's default responders, else whom the user's previous message went to.
-    if (!command && !parseMentions(text).length) targets.push(...this.implicitTargets(roomId));
+    // No @ at all (an @ of a non-member still wakes nobody): the room's default responders, else the quoted members, else whom the user's previous message went to.
+    if (!command && !parseMentions(text).length) targets.push(...this.implicitTargets(roomId, quotedFrom));
     const safeBody = redactText(text.trim() ? text : '');
     const safeArgs = command ? redactText(command.args) : undefined;
     const contentRedacted = safeBody !== (text.trim() ? text : '') || (command !== null && safeArgs !== command.args);
@@ -1457,6 +1570,49 @@ export class Core {
   }
 
   /**
+   * The user takes back a message of theirs that no member has started on. Only copies still waiting in a member's
+   * queue (or held) can be taken back; one already being prepared for a turn or handed to a running one (steer) is
+   * refused, since the runtime may get it. When nobody had the message, it becomes a "withdrawn" mark and its original
+   * text and attachments are returned for editing; otherwise only the waiting copies are cancelled.
+   */
+  withdrawMessage(messageId: string): WithdrawMessageResponse {
+    const m = this.store.getMessage(messageId);
+    if (!m) throw new CoreError(404, L('找不到这条消息', 'Message not found'));
+    if (m.senderKind !== 'user' || m.kind !== 'chat' || m.meta?.type === 'withdrawn') {
+      throw new CoreError(400, L('只能撤回你自己发出、仍在排队的消息', 'Only your own messages that are still queued can be withdrawn'));
+    }
+    const all = this.store.messageDeliveries(m.id);
+    const waiting = all.filter((d) => d.state === 'queued' || d.state === 'held');
+    if (!waiting.length) throw new CoreError(409, L('这条消息已经发出，不能撤回', 'This message was already sent; it cannot be withdrawn'));
+    const parkedKey = (d: DeliveryInfo) => `${d.agentId}:${d.roomId}`;
+    const inQueue = (d: DeliveryInfo) =>
+      d.state === 'held' || this.state(d.agentId).queue.some((x) => x.id === d.id) || (this.parked.get(parkedKey(d)) ?? []).some((x) => x.id === d.id);
+    const busy = waiting.filter((d) => !inQueue(d));
+    if (busy.length) {
+      throw new CoreError(409, L('{who} 已经开始接收这条消息，不能撤回', '{who} already started taking this message; it cannot be withdrawn', { who: busy.map((d) => '@' + this.handleOf(d.agentId)) }));
+    }
+    const ids = new Set(waiting.map((d) => d.id));
+    for (const d of waiting) {
+      const st = this.state(d.agentId);
+      st.queue = st.queue.filter((x) => !ids.has(x.id));
+      const parked = this.parked.get(parkedKey(d));
+      if (parked) this.parked.set(parkedKey(d), parked.filter((x) => !ids.has(x.id)));
+    }
+    if (all.some((d) => d.state !== 'queued' && d.state !== 'held' && d.state !== 'skipped')) {
+      for (const d of waiting) {
+        this.publishDelivery(this.store.updateDelivery(d.id, { state: 'interrupted', error: L('你取消了排队，未发给运行时', 'You cancelled it while queued; not sent to the runtime'), stamp: 'finished' }));
+      }
+      return { removed: false, cancelled: waiting.length };
+    }
+    const raw = this.pendingUserInputs.get(m.id);
+    this.pendingUserInputs.delete(m.id);
+    const attachments = m.attachments ?? [];
+    const updated = this.store.withdrawMessage(m.id);
+    this.bus.publish({ type: 'message.updated', message: updated });
+    return { removed: true, body: raw?.body ?? m.body, attachments };
+  }
+
+  /**
    * Requests interruption of the agent's current turn. The turn is only reported interrupted once it actually ends.
    * While the agent is still waiting for a shared workspace nothing has been sent to the runtime yet: the wait is
    * cancelled and its queued messages are marked interrupted (not dispatched).
@@ -1498,6 +1654,17 @@ export class Core {
       throw new CoreError(409, L('对应的原生请求已不在等待状态（回合已结束或进程已重启），未发送任何决定', 'The native request is no longer waiting (the turn ended or the process restarted); no decision was sent'));
     }
     if (!live.options.includes(decision)) throw new CoreError(400, L('此请求不支持“{decision}”，可选：{options}', 'This request does not support “{decision}”; available: {options}', { decision, options: live.options.join(', ') }));
+    const own = this.ownApprovals.get(live.nativeRequestId);
+    if (own) {
+      this.liveApprovals.delete(messageId);
+      own.settle(decision);
+      const updated = this.store.updateMessage(messageId, {
+        status: 'complete',
+        meta: { ...meta, state: 'resolved', decision, decidedBy: 'user', userDecision: decision, decidedAt: new Date().toISOString() },
+      });
+      this.bus.publish({ type: 'message.updated', message: updated });
+      return updated;
+    }
     if (!live.session.respondApproval) throw new CoreError(409, L('该运行时不支持在群聊中处理审批', 'This runtime does not support approvals in the chat'));
     // A form is answered only by the user's own answers, checked here against what the runtime asked for.
     let answers: ApprovalAnswers | undefined;
@@ -2181,14 +2348,16 @@ export class Core {
   }
 
   /**
-   * Where a user message without an @mention goes: the room's default responders, else the members the user's previous
-   * message went to (even when their turn ended without a word), else the member that last posted a chat message,
-   * else nobody.
+   * Where a user message without an @mention goes: the room's default responders, else the members whose messages it
+   * quotes, else the members the user's previous message went to (even when their turn ended without a word), else the
+   * member that last posted a chat message, else nobody.
    */
-  private implicitTargets(roomId: string): Agent[] {
+  private implicitTargets(roomId: string, quotedFrom: string[] = []): Agent[] {
     const members = this.store.listMembers(roomId);
     const defaults = new Set(this.store.defaultResponders(roomId));
     if (defaults.size) return members.filter((a) => defaults.has(a.id));
+    const quoted = new Set(quotedFrom);
+    if (members.some((a) => quoted.has(a.id))) return members.filter((a) => quoted.has(a.id));
     const previous = new Set(this.store.lastUserRecipients(roomId));
     if (previous.size) return members.filter((a) => previous.has(a.id));
     const last = this.store.lastReplier(roomId);
@@ -2433,7 +2602,7 @@ export class Core {
   }
 
   private async runBatch(agentId: string, roomId: string, batch: DeliveryInfo[], signal: AbortSignal): Promise<void> {
-    let agent = this.store.getAgent(agentId);
+    let agent = this.inRoom(this.store.getAgent(agentId), roomId);
     const room = this.store.getRoom(roomId);
     if (!agent || !room) throw new Error('delivery references missing agent or room');
     const withoutMissingOriginals = (list: DeliveryInfo[]) => list.filter((d) => {
@@ -2506,7 +2675,7 @@ export class Core {
     const still = batch.map((d) => this.store.getDelivery(d.id)).filter((d): d is DeliveryInfo => d?.state === 'queued');
     this.skipRestricted(still.filter((d) => this.restrictedDelivery(d)));
     batch = withoutMissingOriginals(still.filter((d) => !this.restrictedDelivery(d)));
-    agent = this.store.getAgent(agentId) ?? agent;
+    agent = this.inRoom(this.store.getAgent(agentId), roomId) ?? agent;
     sources = sourcesOf(batch);
     if (!sources.length) return;
     source = sources.at(-1)!;
@@ -2714,6 +2883,8 @@ export class Core {
         }
         case 'approval.requested': {
           const options: ApprovalDecision[] = ev.options.includes('deny') ? ev.options : [...ev.options, 'deny'];
+          // Asked by Harness Team itself (askInTurn): answered here, whatever the runtime can answer.
+          const answerable = !!session.respondApproval || this.ownApprovals.has(ev.nativeRequestId);
           const meta: MessageMeta = {
             type: 'approval',
             runtime,
@@ -2725,10 +2896,11 @@ export class Core {
             title: ev.title,
             detail: ev.detail ?? null,
             state: 'pending',
-            options: session.respondApproval ? options : [],
-            // A chat member's web page request has nothing to do with the project folder.
-            workspace:
-              agent.workspace ?? (agent.runtimeKind === 'chat' && ev.nativeMethod !== 'chat/fetch_url' ? (room.projectDir ?? null) : null),
+            options: answerable ? options : [],
+            // A web page request or browser action has nothing to do with the project folder.
+            workspace: ev.nativeMethod.startsWith('ht/browser_')
+              ? null
+              : (agent.workspace ?? (agent.runtimeKind === 'chat' && ev.nativeMethod !== 'chat/fetch_url' && !ev.nativeMethod.startsWith('chat/browser_') ? (room.projectDir ?? null) : null)),
             ...(ev.label ? { label: ev.label } : {}),
             ...(ev.reason ? { reason: redactStrings(ev.reason) } : {}),
             ...(ev.prefix ? { prefix: ev.prefix } : {}),
@@ -2737,7 +2909,7 @@ export class Core {
           };
           const id = claim('approval', meta, meta.title, 'streaming');
           approvals.set(ev.nativeRequestId, id);
-          if (session.respondApproval) {
+          if (answerable) {
             this.liveApprovals.set(id, { agentId: agent.id, roomId: room.id, session, nativeRequestId: ev.nativeRequestId, options, form: ev.form ?? null });
           }
           return;
@@ -2785,6 +2957,8 @@ export class Core {
     const replyRef = { replyMessageId: () => slot.id, status: 'running' };
     this.lastReply.set(`${agent.id}:${room.id}`, replyRef);
     this.state(agent.id).live = live;
+    const sinkKey = `${agent.id}:${room.id}`;
+    this.turnSinks.set(sinkKey, { emit: onEvent, signal });
     try {
       // The agent's saved model/effort at turn start: adapters apply it natively before the turn, never mid-turn. A
       // native command that takes no settings leaves them pending for the next turn.
@@ -2806,6 +2980,8 @@ export class Core {
     } catch (err) {
       result = { status: 'failed', error: errorText(err) };
     }
+    this.turnSinks.delete(sinkKey);
+    for (const own of [...this.ownApprovals.values()]) if (own.key === sinkKey) own.settle('cancelled');
     // What the runtime said goes into the chat, the database and the browser without secrets.
     if (result.error) result = { ...result, error: redactStrings(result.error) };
     replyRef.status = result.status;
@@ -2879,7 +3055,8 @@ export class Core {
    * member that may write (a permission mode other than read-only) works in the room's project folder, so it takes
    * that folder's turn like a coding member there.
    */
-  private workspaceKey(agent: Agent | undefined, roomId: string): string | null {
+  private workspaceKey(member: Agent | undefined, roomId: string): string | null {
+    const agent = this.inRoom(member, roomId);
     if (agent?.workspace) return pathKey(agent.workspace);
     if (agent && chatMayWrite(agent)) {
       const dir = this.store.getRoom(roomId)?.projectDir;
@@ -2922,7 +3099,7 @@ export class Core {
     const ac = new AbortController();
     st.waiting = ac;
     this.setStatus(agentId, 'waiting');
-    const me = this.store.getAgent(agentId);
+    const me = this.inRoom(this.store.getAgent(agentId), roomId);
     const holder = this.store.getAgent(lock.holder);
     this.systemNotice(roomId, N('workspace.wait', { me: me?.handle ?? agentId, holder: holder?.handle ?? lock.holder, path: me?.workspace ?? key }));
     const ok = await new Promise<boolean>((resolveWait) => {
@@ -2973,12 +3150,19 @@ export class Core {
 
   private async sessionFor(agent: Agent, roomId: string): Promise<AgentSession> {
     const key = `${agent.id}:${roomId}`;
-    const cached = this.sessions.get(key);
-    if (cached) return cached;
     const adapter = this.registry.get(agent.runtimeKind)!;
-    const binding = this.store.getBinding(agent.id, roomId);
     const caps = adapter.describe().capabilities;
     const chat = agent.runtimeKind === 'chat';
+    const browserOn = !chat && !!agent.browser && !!this.browserBaseUrl && caps.teamMcp;
+    const cached = this.sessions.get(key);
+    if (cached) {
+      // Turned on or off since it opened: reopened on the same native session (where the runtime can resume one).
+      if ((this.sessionBrowser.get(cached) ?? false) === browserOn || !caps.resume) return cached;
+      this.sessions.delete(key);
+      await cached.unload?.().catch(() => {});
+      await cached.close().catch(() => {});
+    }
+    const binding = this.store.getBinding(agent.id, roomId);
     if (agent.providerId && !chat) throw this.legacyProviderError(agent);
     // Chat members call the Team tools in-process: no token or URL.
     const teamMcp = chat
@@ -2986,6 +3170,7 @@ export class Core {
       : this.teamBaseUrl && caps.teamMcp
         ? { serverName: TEAM_MCP_SERVER, url: this.teamBaseUrl + this.issueTeamToken(agent.id, roomId) }
         : undefined;
+    const browserMcp = browserOn ? { serverName: BROWSER_MCP_SERVER, url: this.browserBaseUrl + this.issueTeamToken(agent.id, roomId) } : undefined;
     // Fixed rules go in once per native session where the runtime has an official option for it. A resumed session
     // keeps what it was started with: only one started with exactly this text gets it again (Claude Code records the
     // system prompt on the first request anyway); older sessions keep receiving the rules in every turn.
@@ -3021,6 +3206,7 @@ export class Core {
           resumeNativeSessionId: binding.nativeSessionId,
           adapterState: binding.adapterState,
           teamMcp,
+          ...(browserMcp ? { browserMcp } : {}),
           instructions: same ? instructions : undefined,
           readableDirs,
           language,
@@ -3038,7 +3224,7 @@ export class Core {
         throw new SessionChoicePending();
       }
     } else {
-      session = await adapter.openSession({ agent, roomId, teamMcp, instructions, readableDirs, language, billing, onBilling, onAdapterState, onLateUsage });
+      session = await adapter.openSession({ agent, roomId, teamMcp, ...(browserMcp ? { browserMcp } : {}), instructions, readableDirs, language, billing, onBilling, onAdapterState, onLateUsage });
     }
     this.store.upsertBinding({
       agentId: agent.id,
@@ -3056,8 +3242,68 @@ export class Core {
       // Every newly opened session says it again when tools run without asking you (or are denied silently).
       for (const w of [session.permission.mismatch, session.permission.risky]) if (w) this.systemNotice(roomId, N('turn.mismatch', { text: w }));
     }
+    this.sessionBrowser.set(session, browserOn);
     this.sessions.set(key, session);
     return session;
+  }
+
+  /**
+   * Asks the user in the chat, inside the turn the member runs in that room now, about something Harness Team itself
+   * does for it (the browser). 'noTurn' when no turn runs there; 'cancelled' when the turn ends or `signal` aborts first.
+   */
+  askInTurn(
+    id: TeamIdentity,
+    card: { name: string; title: string; detail: string; reason: string; options: ApprovalDecision[] },
+    signal?: AbortSignal,
+  ): Promise<ApprovalDecision | 'cancelled' | 'noTurn'> {
+    const key = `${id.agentId}:${id.roomId}`;
+    const turn = this.turnSinks.get(key);
+    if (!turn || turn.signal.aborted) return Promise.resolve('noTurn');
+    if (signal?.aborted) return Promise.resolve('cancelled');
+    const nativeRequestId = `ht-${randomUUID()}`;
+    return new Promise((resolve) => {
+      let done = false;
+      const onAbort = () => settle('cancelled');
+      const settle = (d: ApprovalDecision | 'cancelled') => {
+        if (done) return;
+        done = true;
+        this.ownApprovals.delete(nativeRequestId);
+        turn.signal.removeEventListener('abort', onAbort);
+        signal?.removeEventListener('abort', onAbort);
+        if (d === 'cancelled') turn.emit({ type: 'approval.resolved', nativeRequestId, decision: 'cancelled' });
+        resolve(d);
+      };
+      this.ownApprovals.set(nativeRequestId, { key, settle });
+      turn.signal.addEventListener('abort', onAbort, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      turn.emit({
+        type: 'approval.requested',
+        nativeRequestId,
+        nativeMethod: `ht/${card.name}`,
+        title: card.title,
+        detail: card.detail,
+        reason: card.reason,
+        options: card.options,
+      });
+    });
+  }
+
+  /**
+   * What a browser call of a runtime member needs (refusal text when it may not use the browser now): the member, the
+   * folder relative upload paths start in, its language, and whether its permission mode asks for approvals.
+   */
+  browserTarget(id: TeamIdentity): { agent: Agent; workDir: string | null; lang: AgentLanguage; asks: boolean } | { refused: 'gone' | 'off' | 'noTurn' } {
+    const agent = this.store.getAgent(id.agentId);
+    if (!agent || agent.deletedAt || !this.store.getRoom(id.roomId) || !this.store.isMember(id.roomId, id.agentId)) return { refused: 'gone' };
+    if (!agent.browser) return { refused: 'off' };
+    if (!this.turnSinks.has(`${id.agentId}:${id.roomId}`)) return { refused: 'noTurn' };
+    const mode = agent.permissionMode;
+    return {
+      agent,
+      workDir: this.store.memberWorkspace(id.roomId, id.agentId) ?? agent.workspace,
+      lang: this.languageOf(id.agentId, id.roomId),
+      asks: !(mode && RISKY_PERMISSION_MODES.includes(mode)),
+    };
   }
 
   private saveAdapterState(agentId: string, roomId: string, session: AgentSession) {
@@ -3271,6 +3517,10 @@ function isTerminal(s: DeliveryInfo['state']): boolean {
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,199}$/;
 
 /** A runtime that cannot be used right now (with its own reason when it gave one). */
+function browserRefused(runtime: string): CoreError {
+  return new CoreError(400, L('{runtime} 成员不能使用 Harness Team 的浏览器', '{runtime} members cannot use the Harness Team browser', { runtime }));
+}
+
 function runtimeUnavailable(runtime: string, note?: Localized | null): NoticeText {
   return L('Runtime「{runtime}」当前不可用{note}', 'The runtime “{runtime}” is not available right now{note}', {
     runtime,

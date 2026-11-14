@@ -319,7 +319,8 @@ function main() {
       shell.showItemInFolder(p);
       return { ok: true, revealed: true };
     });
-    // A file a member cited in its reply: same rules as attachments, for a plain local path (localFilePath).
+    // A file or folder a member cited in its reply: same rules as attachments, for a plain local path (localFilePath).
+    // A folder opens in the file manager.
     ipcMain.removeHandler('ht:local-file');
     ipcMain.handle('ht:local-file', async (event, action, raw) => {
       const from = event.senderFrame && event.senderFrame.url;
@@ -327,7 +328,13 @@ function main() {
       if (action !== 'open' && action !== 'reveal') return { ok: false, error: 'denied' };
       const p = localFilePath(raw);
       if (!p) return { ok: false, error: 'missing' };
-      if (action === 'open' && canOpenDirectly(p)) {
+      let folder = false;
+      try {
+        folder = fs.lstatSync(p).isDirectory();
+      } catch {
+        return { ok: false, error: 'missing' };
+      }
+      if (action === 'open' && (folder || canOpenDirectly(p))) {
         const err = await shell.openPath(p);
         if (!err) return { ok: true, revealed: false };
         log.write(`[shell] open cited file failed: ${err}`);

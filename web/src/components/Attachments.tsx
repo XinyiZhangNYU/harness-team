@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import type { AttachmentInfo } from '../../../shared/protocol.ts';
 import { attachmentUrl, formatBytes, type DraftAttachment } from '../attachments.ts';
-import { citationLabel, citationPath, type FileCitation } from '../file-citations.ts';
+import { citationLabel, citationPath, type FileCitation, looksLikeFolder } from '../file-citations.ts';
 import { useT } from '../i18n.tsx';
 import { Dialog } from './Dialog.tsx';
 import { HelpTip } from './HelpTip.tsx';
@@ -103,17 +103,27 @@ function FileCard({ roomId, file }: { roomId: string; file: AttachmentInfo }) {
  * A file a member cited in its reply. In the desktop app a click opens it with its default program (programs, scripts
  * and pages are shown in their folder instead); in a browser it is plain text with the full path on hover.
  */
-export function FileCitationChip({ citation, workspace }: { citation: FileCitation; workspace: string | null | undefined }) {
+export function FileCitationChip({
+  citation,
+  workspace,
+  label: text,
+}: {
+  citation: FileCitation;
+  workspace: string | null | undefined;
+  /** The link text, when the member wrote a Markdown link; otherwise the file name. */
+  label?: ReactNode;
+}) {
   const t = useT();
   const [note, setNote] = useState<string | null>(null);
-  const label = citationLabel(citation);
+  const label = text ?? citationLabel(citation);
+  const icon = looksLikeFolder(citation.path) ? 'folder' : 'file';
   const target = citationPath(citation.path, workspace);
   const open = window.harnessDesktop?.localFile;
   const title = note ? `${note}: ${citation.path}` : citation.path;
   if (!open || !target) {
     return (
       <span className="file-cite" title={title}>
-        <Icon name="file" size={13} />
+        <Icon name={icon} size={13} />
         {label}
       </span>
     );
@@ -129,7 +139,7 @@ export function FileCitationChip({ citation, workspace }: { citation: FileCitati
   };
   return (
     <button type="button" className={`file-cite${note ? ' file-cite-failed' : ''}`} title={title} onClick={() => void act()}>
-      <Icon name="file" size={13} />
+      <Icon name={icon} size={13} />
       {label}
     </button>
   );

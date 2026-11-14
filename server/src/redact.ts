@@ -546,8 +546,9 @@ type Rule = [RegExp, string | ((m: string, ...groups: string[]) => string)];
 // rules take linear time. Which values are secrets is decided in code on the captured value, not by the pattern.
 // Quoted fields and arguments share one boundary for actual and JSON-escaped line breaks.
 const RULES: Rule[] = [
-  // The Team MCP token in the URL path.
+  // The Team MCP token in the URL path (the browser server's URL carries the same token).
   [/\/team-mcp\/[A-Za-z0-9_-]+/g, '/team-mcp/[redacted]'],
+  [/\/browser-mcp\/[A-Za-z0-9_-]+/g, '/browser-mcp/[redacted]'],
   // PEM private keys (also inside JSON strings, where the line breaks are escaped).
   [/-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----[\s\S]*?(?:-----END \1PRIVATE KEY-----|$)/g, '[redacted private key]'],
   // user:password@ in a URL.

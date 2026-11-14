@@ -7,6 +7,7 @@ import { ContextMenu, type MenuItem } from './ContextMenu.tsx';
 import { Dialog, errorText } from './Dialog.tsx';
 import { Icon } from './Icon.tsx';
 import { AgentAvatar } from './RuntimeBadge.tsx';
+import { DateTimeField, TimeField } from './TimePicker.tsx';
 
 /** How many assignee avatars a task shows before "+n". */
 const SHOWN = 3;
@@ -322,7 +323,7 @@ function ScheduleDialog(props: { roomId: string; schedule: ScheduledTask | null;
             <label className="field-label" htmlFor="schedule-at">
               {t('sched.at')}
             </label>
-            <input id="schedule-at" type="datetime-local" value={at} onChange={(e) => setAt(e.target.value)} />
+            <DateTimeField id="schedule-at" value={at} onChange={setAt} />
           </div>
         )}
         {kind === 'weekly' && (
@@ -348,7 +349,7 @@ function ScheduleDialog(props: { roomId: string; schedule: ScheduledTask | null;
             <label className="field-label" htmlFor="schedule-time">
               {t('sched.at')}
             </label>
-            <input id="schedule-time" type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+            <TimeField id="schedule-time" value={time} onChange={setTime} />
           </div>
         )}
         {kind === 'interval' && (
